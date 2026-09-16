@@ -63,10 +63,17 @@ cMask = bwareaopen(cMask, round(minArea));
 eMask = buildEdgeMask(gray, W, minArea);
 
 % ---------------- 3. 打分选优 ----------------
-[boxC, maskC, scC] = bestRegion(cMask, gray, colorMask, minArea);
-[boxE, maskE, scE] = bestRegion(eMask, gray, colorMask, minArea);
+[boxC, maskC, scC] = bestRegion(cMask, gray, colorMask, minArea, minExtent, minColorFr);
+[boxE, maskE, scE] = bestRegion(eMask, gray, colorMask, minArea, minExtent, minColorFr);
 
-if scC.score >= scE.score
+% 两个通道之间也按同一把尺子比: 先看谁给出了"通过双闸门"的候选, 再看分数。
+% 否则边缘通道的高分糊块会盖掉颜色通道已经找到的真车牌。
+if scC.gated == scE.gated
+    takeColor = scC.score >= scE.score;
+else
+    takeColor = scC.gated;
+end
+if takeColor
     plateBox = boxC; plateMask = maskC; scoreInfo = scC; scoreInfo.source = 'color';
 else
     plateBox = boxE; plateMask = maskE; scoreInfo = scE; scoreInfo.source = 'edge';
@@ -99,9 +106,11 @@ bw = imfill(bw, 'holes');
 mask = bwareaopen(bw, round(minArea));
 end
 
-function [box, regionMask, info] = bestRegion(mask, gray, colorMask, minArea)
+function [box, regionMask, info] = bestRegion(mask, gray, colorMask, minArea, minExtent, minColorFr)
 %BESTREGION 对掩膜中所有连通域打分, 返回得分最高的车牌候选
-box = []; regionMask = []; bestScore = -inf; info = emptyInfo(); nCand = 0;
+%   双闸门(矩形度 + 框内底色占比)在这里参与选优, 不只是最后校验胜出者 —— 见下面注释。
+box = []; regionMask = []; info = emptyInfo(); nCand = 0;
+haveBest = false; bestScore = -inf; bestPass = false;
 if ~any(mask(:)), return; end
 
 CC = bwconncomp(mask);
@@ -135,15 +144,25 @@ for k = 1:numel(stats)
 
     score = 0.30 * sAR + 0.15 * sArea + 0.25 * sCol + 0.20 * sEdge + 0.10 * sExt;
 
-    if score > bestScore
-        bestScore = score;
+    % 选优以"是否通过双闸门"为主序, 分数为次序。
+    %
+    % 原来这两个闸门只在 bestRegion 返回之后校验冠军。代价是: 只要有一个
+    % 底色占比 0 的边缘糊块得分更高, 它就会把真正通过闸门的彩色候选挤掉,
+    % 然后自己又被闸门否掉 —— 整张图报"未检测到车牌", 而正确答案其实一直
+    % 躺在候选列表里。实测 real01(新能源绿牌): 颜色掩膜已经给出
+    % [660 675 164 36] (中位 H=0.41 / S=0.71, 正是绿牌底色), 却因为一个
+    % 边缘块胜出而被丢掉。改成主序选优后 real01 恢复正常, 且 bench/hard
+    % 逐图结果完全不变。
+    pass = (sExt >= minExtent) && (sCol >= minColorFr);
+    if ~haveBest || (pass && ~bestPass) || (pass == bestPass && score > bestScore)
+        haveBest = true; bestScore = score; bestPass = pass;
         box = bb;
         regionMask = false(H, W);
         regionMask(stats(k).PixelIdxList) = true;
         info = struct('score', score, 'source', '', 'aspect', ar, ...
                       'colorFrac', sCol, 'edgeDensity', eDen, 'edgesFrac', eDen, ...
                       'extent', sExt, 'area', area, 'nCand', 0, ...
-                      'valid', false, 'reject', '');
+                      'gated', pass, 'valid', false, 'reject', '');
     end
 end
 if ~isempty(box), info.nCand = nCand; end
@@ -175,5 +194,6 @@ end
 function s = emptyInfo()
 s = struct('score', -inf, 'source', '', 'aspect', 0, 'colorFrac', 0, ...
             'edgeDensity', 0, 'edgesFrac', 0, 'extent', 0, 'area', 0, 'nCand', 0, ...
-            'valid', false, 'reject', '没有找到长宽比/面积像车牌的候选区域');
+            'gated', false, 'valid', false, ...
+            'reject', '没有找到长宽比/面积像车牌的候选区域');
 end

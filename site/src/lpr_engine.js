@@ -400,7 +400,7 @@ function boxMean(img, w, h, k) {
  * ================================================================ */
 
 /* ---------------- 定位(对应 locatePlate.m) ---------------- */
-function bestRegion(mask, w, h, gray, colorMask, minArea, sc) {
+function bestRegion(mask, w, h, gray, colorMask, minArea, minExtent, minColorFr, sc) {
   var ed = sobelVertical(gray, w, h);
   var r = label8(mask, w, h);
   var best = null;
@@ -430,11 +430,15 @@ function bestRegion(mask, w, h, gray, colorMask, minArea, sc) {
     var sEdge = Math.min(1, eDen / 0.25);
     var extent = area / (bw * bh);
     var score = 0.30 * sAR + 0.15 * sArea + 0.25 * sCol + 0.20 * sEdge + 0.10 * extent;
-    if (!best || score > best.score) {
+    /* 选优以"是否通过双闸门"为主序, 分数为次序 —— 与 MATLAB 版一致。
+       原来这两个闸门只在 bestRegion 返回后校验冠军: 底色占比 0 的边缘糊块
+       可以先靠分数把真车牌挤掉, 然后自己被闸门否掉, 整张图报"未检测到车牌"。 */
+    var pass = (extent >= minExtent) && (sCol >= minColorFr);
+    if (!best || (pass && !best.gated) || (pass === best.gated && score > best.score)) {
       best = {
         score: score, aspect: ar, colorFrac: sCol, edgeDensity: eDen,
         extent: extent, area: area, box: [st.minX, st.minY, bw, bh],
-        label: k + 1
+        gated: pass, label: k + 1
       };
     }
   }
@@ -504,11 +508,17 @@ function locatePlate(rgba, w, h, opts) {
   /* 边缘掩膜(备用通道, 兼容无颜色/黑白图) */
   var eMask = buildEdgeMask(gray, w, h, minArea, sc);
 
-  var cReg = bestRegion(cMask, w, h, gray, colorMask, minArea, sc);
-  var eReg = bestRegion(eMask, w, h, gray, colorMask, minArea, sc);
+  var cReg = bestRegion(cMask, w, h, gray, colorMask, minArea, minExtent, minColorFr, sc);
+  var eReg = bestRegion(eMask, w, h, gray, colorMask, minArea, minExtent, minColorFr, sc);
 
+  /* 两个通道之间也按同一把尺子比: 先看谁给出"通过双闸门"的候选, 再看分数。
+     否则边缘通道的高分糊块会盖掉颜色通道已经找到的真车牌。 */
   var pick, source;
-  if (cReg && (!eReg || cReg.score >= eReg.score)) { pick = cReg; source = 'color'; }
+  var cGated = !!(cReg && cReg.gated), eGated = !!(eReg && eReg.gated);
+  var takeColor = (cGated === eGated)
+    ? (!!cReg && (!eReg || cReg.score >= eReg.score))
+    : cGated;
+  if (takeColor) { pick = cReg; source = 'color'; }
   else { pick = eReg; source = 'edge'; }
 
   if (!pick) {
