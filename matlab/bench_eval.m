@@ -1,10 +1,12 @@
-function S = bench_eval(benchDir, verbose)
+function S = bench_eval(benchDir, verbose, csvName)
 %BENCH_EVAL 在带标注的图片集上评估识别率(供 bench_run.m / verify_lpr.m 调用)
 %
 %   S = BENCH_EVAL()                     % 默认用工程自带 bench/
 %   S = BENCH_EVAL(benchDir, false)      % 不打印明细
+%   S = BENCH_EVAL(benchDir, false, 'expected.csv')   % 换标注文件名(演示图集用这个)
 %
-%   benchDir 目录下需有 labels.csv, 列为 file,text (文件名 + 正确车牌号)
+%   benchDir 目录下需有标注文件(默认为 labels.csv), 列为 file,text (文件名 + 正确车牌号)
+%   labels.csv / expected.csv 都找不到时才报错
 %   返回结构体: n / plateOk / plateAcc / charOk / charTotal / charAcc
 %               cnOk / cnTotal / cnAcc / segOk / segAcc / timeAvg / got / expect
 
@@ -12,10 +14,18 @@ if nargin < 1 || isempty(benchDir)
     benchDir = fullfile(fileparts(mfilename('fullpath')), 'bench');
 end
 if nargin < 2 || isempty(verbose), verbose = true; end
+if nargin < 3 || isempty(csvName), csvName = 'labels.csv'; end
 
-csvFile = fullfile(benchDir, 'labels.csv');
+csvFile = fullfile(benchDir, csvName);
+if exist(csvFile, 'file') ~= 2          % 报错前按两种惯用文件名再找一遍
+    cand = {'labels.csv', 'expected.csv'};
+    for i = 1:numel(cand)
+        q = fullfile(benchDir, cand{i});
+        if exist(q, 'file') == 2, csvFile = q; break; end
+    end
+end
 if exist(csvFile, 'file') ~= 2
-    error('bench_eval:noLabels', '找不到标注文件: %s', csvFile);
+    error('bench_eval:noLabels', '找不到标注文件: %s', fullfile(benchDir, csvName));
 end
 T = readtable(csvFile, 'Encoding', 'UTF-8', 'VariableNamingRule', 'preserve');
 
