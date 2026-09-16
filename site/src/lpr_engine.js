@@ -901,6 +901,37 @@ function adjustToCount(runs, proj, n) {
   return runs;
 }
 
+/* 自校准定字数(对应 segmentChars.m 的 chooseCount)
+   不要用 span/W 这类固定比例估字数: 7 位普通牌与 8 位新能源牌裁紧后 span/W
+   都在 0.87 左右, 固定比例必然把 8 位牌(新能源绿牌)当成 7 位, 结果是被强制
+   合并掉一个字, 整牌全错。改成用切分结果自校准:
+   判据是相邻字符"中心间距"越均匀越好 —— 两个字被并成一段(间距约 2 倍)、
+   或一个字被切成两段(间距约 0.5 倍)都会让间距忽大忽小, 所以间距的变异系数
+   (标准差/均值)最小的那个候选就是最可能的真实字数。 */
+function chooseCount(runs, proj) {
+  var best = Infinity, bestRuns = runs, n, i, r, d, m, v;
+  for (n = 6; n <= 8; n++) {
+    var copy = [];
+    for (i = 0; i < runs.length; i++) { copy.push(runs[i].slice()); }
+    r = adjustToCount(copy, proj, n);
+    if (r.length !== n) { continue; }
+    d = [];
+    for (i = 1; i < r.length; i++) {
+      d.push((r[i][0] + r[i][1]) / 2 - (r[i - 1][0] + r[i - 1][1]) / 2);
+    }
+    if (d.length < 3) { continue; }
+    m = 0;
+    for (i = 0; i < d.length; i++) { m += d[i]; }
+    m /= d.length;
+    if (m <= 1e-9) { continue; }
+    v = 0;
+    for (i = 0; i < d.length; i++) { v += (d[i] - m) * (d[i] - m); }
+    v /= d.length;
+    if (Math.sqrt(v) / m < best - 1e-9) { best = Math.sqrt(v) / m; bestRuns = r; }
+  }
+  return bestRuns;
+}
+
 /* 去掉贴在裁剪边界上的窄条连通域(车牌左右边框没被清干净的残留)。
    这类残留会多出一个"字符", 并让字符总跨度 span 变大,
    进而使估算字数 nEst 偏大(7 位牌被当成 8 位)。 */
@@ -957,9 +988,7 @@ function segmentChars(plateGray, w, h) {
   var minW = Math.max(2, Math.round(0.015 * w));
   runs = runs.filter(function (r) { return (r[1] - r[0] + 1) >= minW; });
   if (runs.length) {
-    var span = runs[runs.length - 1][1] - runs[0][0] + 1;
-    var nEst = Math.min(8, Math.max(6, Math.round(span / (0.125 * w))));
-    runs = adjustToCount(runs, pm, nEst);
+    runs = chooseCount(runs, pm);
   }
   var chars = [], ink = [];
   for (var k = 0; k < runs.length; k++) {
@@ -967,6 +996,52 @@ function segmentChars(plateGray, w, h) {
     ink.push(inkBox(bw, w, h, runs[k][0], runs[k][1]));
   }
   return { chars: chars, ink: ink, bw: bw, bounds: runs };
+}
+
+/* ---------------- 车牌制式(对应 plateFormat.m) ---------------- */
+var PLATE_PROV = '京津冀晋蒙辽吉黑沪苏浙皖闽赣鲁豫鄂湘粤桂琼渝川贵云藏陕甘青宁新';
+var PLATE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';   /* 车牌不用 I 和 O */
+var PLATE_ALNUM = PLATE_LETTERS + '0123456789';
+
+/* 依据 GA 36-2018:
+     普通汽车(蓝底/黄底单排)  7 位 = 省简称 + 发牌机关字母 + 5 位字母数字
+     新能源小型车(绿底单排)   8 位 = 省简称 + 发牌机关字母 + 字母 + 5 位字母数字 */
+function plateFormat(n) {
+  var sets = [], label, k;
+  if (n === 8) {
+    label = '新能源 8 位';
+    sets = [PLATE_PROV, PLATE_LETTERS, PLATE_LETTERS];
+    for (k = 3; k < 8; k++) { sets.push(PLATE_ALNUM); }
+  } else if (n === 7) {
+    label = '普通 7 位';
+    sets = [PLATE_PROV, PLATE_LETTERS];
+    for (k = 2; k < 7; k++) { sets.push(PLATE_ALNUM); }
+  } else {
+    label = n + ' 位(未收录制式)';
+    for (k = 0; k < n; k++) {
+      sets.push(k === 0 ? PLATE_PROV : (k === 1 ? PLATE_LETTERS : PLATE_ALNUM));
+    }
+  }
+  return { n: n, label: label, sets: sets };
+}
+
+function restrictSet(set, allowed) {
+  if (!allowed) { return set; }
+  var items = [], labels = [];
+  for (var i = 0; i < set.items.length; i++) {
+    if (allowed.indexOf(set.items[i].label) >= 0) {
+      items.push(set.items[i]);
+      labels.push(set.items[i].label);
+    }
+  }
+  return items.length ? { labels: labels, items: items } : set;
+}
+
+/* 第 k 位允许的模板集合: 先按位选模板组, 再用制式收窄 */
+function positionSet(S, fmt, k) {
+  var set = (k === 0) ? S.chinese : (k === 1 ? S.letters : S.alnum);
+  if (fmt && fmt.sets && k < fmt.sets.length) { set = restrictSet(set, fmt.sets[k]); }
+  return set;
 }
 
 /* ---------------- 模板库 ---------------- */
@@ -1047,16 +1122,17 @@ function bestMatch(f, set, opts) {
 function recognizeChars(charImages, inkBoxes) {
   var S = TEMPLATES;
   if (!S) { throw new Error('templates not loaded'); }
+  var fmt = plateFormat(charImages.length);
   var chars = [], scores = [], n = charImages.length;
   for (var k = 0; k < n; k++) {
     var f = charFeature(charImages[k]);
-    var set = (k === 0) ? S.chinese : (k === 1 ? S.letters : S.alnum);
+    var set = positionSet(S, fmt, k);   /* 只在该位允许的字符里找最优 */
     var r = bestMatch(f, set);
     /* 汉字之后的位置上, 如果这一段墨迹特别细长, 基本只可能是数字 1。
        归一化的 'fill' 模式会把细长笔画横向拉伸得很宽, 长得像 4, 容易误判,
        所以这里给一个很小的加分把它纠回来(只影响极窄的段)。 */
     if (k >= 2 && inkBoxes && inkBoxes[k] && inkBoxes[k].ar > 0 && inkBoxes[k].ar < 0.30) {
-      var alt = bestMatch(f, S.alnum, { only: '1' });
+      var alt = bestMatch(f, restrictSet(set, '1'));
       if (alt.score + 0.06 > r.score) { r = alt; }
     }
     var lb = r.label;
@@ -1064,7 +1140,195 @@ function recognizeChars(charImages, inkBoxes) {
     chars.push(lb);
     scores.push(r.score);
   }
-  return { text: chars.join(''), chars: chars, scores: scores };
+  return { text: chars.join(''), chars: chars, scores: scores, format: fmt.label, charCount: n };
+}
+
+/* ---------------- 四角检测 + 透视校正(对应 correctPlate.m) ---------------- */
+
+function hyp2(u, v) { return Math.hypot(u, v); }
+
+/* 只保留面积最大的连通域(车牌外框残留常是贴边的细长条, 会把极值点带偏) */
+function keepLargest(mask, w, h) {
+  var r = label8(mask, w, h);
+  if (r.stats.length <= 1) { return mask; }
+  var bi = 0, i;
+  for (i = 1; i < r.stats.length; i++) { if (r.stats[i].area > r.stats[bi].area) { bi = i; } }
+  var out = new Float32Array(w * h);
+  for (i = 0; i < w * h; i++) { if (r.labels[i] === bi + 1) { out[i] = mask[i]; } }
+  return out;
+}
+
+/* 两向量夹角与 90 度的偏差(度) */
+function rightAngleDev(u, v) {
+  var c = (u[0] * v[0] + u[1] * v[1]) / Math.max(1e-9, hyp2(u[0], u[1]) * hyp2(v[0], v[1]));
+  c = Math.max(-1, Math.min(1, c));
+  return Math.abs(90 - Math.acos(c) * 180 / Math.PI);
+}
+
+function quadEdges(q) {
+  var e = [];
+  for (var i = 0; i < 4; i++) {
+    e.push([q[(i + 1) % 4][0] - q[i][0], q[(i + 1) % 4][1] - q[i][1]]);
+  }
+  return e;
+}
+
+/* 四边形合理性: 有限、没跑出图像太远、是凸四边形、长宽比像车牌、掩膜基本填满它 */
+function quadOK(q, w, h, mask) {
+  var i;
+  for (i = 0; i < 4; i++) {
+    if (!isFinite(q[i][0]) || !isFinite(q[i][1])) { return false; }
+    if (q[i][0] < -0.20 * w || q[i][0] > 1.20 * w) { return false; }
+    if (q[i][1] < -0.20 * h || q[i][1] > 1.20 * h) { return false; }
+  }
+  var e = quadEdges(q), cr = [];
+  for (i = 0; i < 4; i++) {
+    cr.push(e[i][0] * e[(i + 1) % 4][1] - e[i][1] * e[(i + 1) % 4][0]);
+  }
+  var allPos = true, allNeg = true;
+  for (i = 0; i < 4; i++) {
+    if (cr[i] <= 0) { allPos = false; }
+    if (cr[i] >= 0) { allNeg = false; }
+  }
+  if (!allPos && !allNeg) { return false; }
+  var wAvg = (hyp2(e[0][0], e[0][1]) + hyp2(e[2][0], e[2][1])) / 2;
+  var hAvg = (hyp2(e[1][0], e[1][1]) + hyp2(e[3][0], e[3][1])) / 2;
+  if (wAvg < 0.45 * w || hAvg < 0.45 * h) { return false; }
+  var ar = wAvg / Math.max(1e-9, hAvg);
+  if (ar < 1.8 || ar > 4.5) { return false; }
+  var area = 0, nz = 0;
+  for (i = 0; i < 4; i++) {
+    area += q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1];
+  }
+  area = Math.abs(area) / 2;
+  for (i = 0; i < mask.length; i++) { if (mask[i] > 0) { nz++; } }
+  if (nz < 0.55 * area || nz > 1.60 * area) { return false; }
+  return true;
+}
+
+/* 由掩膜的"极值点"取四角: 车牌是凸四边形, 而凸多边形上线性函数的最值一定在
+   顶点取到, 所以 x+y 最小 -> 左上, x+y 最大 -> 右下, x-y 最大 -> 右上,
+   x-y 最小 -> 左下。与车牌是转了、歪了、还是被拍成了梯形都无关。
+   (试过再拟合四边直线去精修: 裁剪框是掩膜外接矩形, 车牌自己的边常贴着裁剪
+   边界, 拟合容易被截断点带跑, 反而变差, 所以不用。) */
+function detectQuad(mask, w, h) {
+  if (w < 24 || h < 8) { return null; }
+  var m = imclose(mask, w, h, 5, 5, makeScratch());
+  m = fillHoles(m, w, h);
+  m = areaOpen(m, w, h, 20);
+  m = keepLargest(m, w, h);
+  var sMin = Infinity, sMax = -Infinity, dMin = Infinity, dMax = -Infinity;
+  var iSM = -1, iSMx = -1, iDMx = -1, iDM = -1, n = 0;
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      if (m[y * w + x] <= 0) { continue; }
+      n++;
+      var sv = x + y, dv = x - y;
+      if (sv < sMin) { sMin = sv; iSM = y * w + x; }
+      if (sv > sMax) { sMax = sv; iSMx = y * w + x; }
+      if (dv > dMax) { dMax = dv; iDMx = y * w + x; }
+      if (dv < dMin) { dMin = dv; iDM = y * w + x; }
+    }
+  }
+  if (n < 50) { return null; }
+  var quad = [iSM, iDMx, iSMx, iDM].map(function (idx) {
+    return [idx % w, Math.floor(idx / w)];
+  });
+  for (var a = 0; a < 4; a++) {
+    for (var b = a + 1; b < 4; b++) {
+      if (quad[a][0] === quad[b][0] && quad[a][1] === quad[b][1]) { return null; }
+    }
+  }
+  return quadOK(quad, w, h, m) ? quad : null;
+}
+
+/* 四角是不是"明显被拍成了梯形"。纯旋转的车牌三项都接近 0, 走旋转校正即可;
+   小车牌(几十像素宽)的掩膜是台阶状的, 极值点会抖一两个像素, 折算成角度能到
+   七八度, 容易误判成梯形, 所以小牌一律不做透视。 */
+function hasPerspective(q) {
+  var e = quadEdges(q);
+  var wT = hyp2(e[0][0], e[0][1]), wB = hyp2(e[2][0], e[2][1]);
+  var hL = hyp2(e[3][0], e[3][1]), hR = hyp2(e[1][0], e[1][1]);
+  var wAvg = (wT + wB) / 2, hAvg = (hL + hR) / 2;
+  if (hAvg < 32 || wAvg < 96) { return false; }
+  var dw = Math.abs(wT - wB) / Math.max(1e-9, wAvg);
+  var dh = Math.abs(hL - hR) / Math.max(1e-9, hAvg);
+  var neg = function (v) { return [-v[0], -v[1]]; };
+  var dev = Math.max(
+    rightAngleDev(e[0], neg(e[3])), rightAngleDev(e[1], neg(e[0])),
+    rightAngleDev(e[2], neg(e[1])), rightAngleDev(e[3], neg(e[2])));
+  return dw > 0.08 || dh > 0.08 || dev > 10;
+}
+
+/* 高斯消元解 8x8 线性方程组(列主元), 奇异时返回 null */
+function solve8(A, b) {
+  var n = 8, i, j, k;
+  for (i = 0; i < n; i++) { A[i].push(b[i]); }
+  for (i = 0; i < n; i++) {
+    var piv = i;
+    for (k = i + 1; k < n; k++) { if (Math.abs(A[k][i]) > Math.abs(A[piv][i])) { piv = k; } }
+    if (Math.abs(A[piv][i]) < 1e-12) { return null; }
+    var tmp = A[i]; A[i] = A[piv]; A[piv] = tmp;
+    for (k = i + 1; k < n; k++) {
+      var f = A[k][i] / A[i][i];
+      if (f === 0) { continue; }
+      for (j = i; j <= n; j++) { A[k][j] -= f * A[i][j]; }
+    }
+  }
+  var x = new Array(n);
+  for (i = n - 1; i >= 0; i--) {
+    var acc = A[i][n];
+    for (j = i + 1; j < n; j++) { acc -= A[i][j] * x[j]; }
+    x[i] = acc / A[i][i];
+  }
+  return x;
+}
+
+/* 求把输出矩形映射到车牌四边形的单应矩阵([u v 1] ~ [x y 1] * H, 行优先 9 个数) */
+function homographyRectToQuad(quad, outW, outH) {
+  var src = [[1, 1], [outW, 1], [outW, outH], [1, outH]];
+  var A = [], b = [];
+  for (var i = 0; i < 4; i++) {
+    var x = src[i][0], y = src[i][1], u = quad[i][0], v = quad[i][1];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  var h = solve8(A, b);
+  if (!h) { return null; }
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+
+/* 把四边形区域重采样成 outW x outH 的矩形(双线性插值) */
+function warpQuad(src, sw, sh, ch, quad, outW, outH) {
+  var Hm = homographyRectToQuad(quad, outW, outH);
+  var out = new Float32Array(outW * outH * ch);
+  if (!Hm) { return { data: out, w: outW, h: outH }; }
+  for (var v = 0; v < outH; v++) {
+    for (var u = 0; u < outW; u++) {
+      var x = u + 1, y = v + 1;
+      var wq = Hm[6] * x + Hm[7] * y + Hm[8];
+      var o = (v * outW + u) * ch;
+      if (Math.abs(wq) < 1e-12) { continue; }
+      var sx = (Hm[0] * x + Hm[1] * y + Hm[2]) / wq;
+      var sy = (Hm[3] * x + Hm[4] * y + Hm[5]) / wq;
+      var x0 = Math.floor(sx), y0 = Math.floor(sy);
+      var fx = sx - x0, fy = sy - y0;
+      for (var c = 0; c < ch; c++) {
+        var acc = 0;
+        for (var j = 0; j < 2; j++) {
+          var yy = y0 + j;
+          if (yy < 0 || yy >= sh) { continue; }
+          for (var i2 = 0; i2 < 2; i2++) {
+            var xx = x0 + i2;
+            if (xx < 0 || xx >= sw) { continue; }
+            acc += src[(yy * sw + xx) * ch + c] * ((i2 ? fx : 1 - fx) * (j ? fy : 1 - fy));
+          }
+        }
+        out[o + c] = acc;
+      }
+    }
+  }
+  return { data: out, w: outW, h: outH };
 }
 
 /* ---------------- 主入口 ---------------- */
@@ -1160,7 +1424,32 @@ function run(imgData, options) {
   var crop = cropRGBA(rgba0, W0, H0, boxOrig, pad);
   res.dbgCropPre = crop;
   var mw = maskC.w, mh = maskC.h;
-  if (useAng !== 0) {
+
+  /* 透视校正: 掩膜四角明显是个梯形(斜拍)时才做, 旋转和透视一次解决;
+     四角基本还是矩形时走下面的旋转校正 —— 本来就正的图没必要多插值一次,
+     多一次重采样就多一次模糊, 对模板匹配是纯亏。 */
+  var quadW = detectQuad(maskC.data, mw, mh);
+  var quadFull = null;
+  if (quadW) {
+    var mx0 = Math.max(0, Math.round(loc.box[0]) - padW);
+    var my0 = Math.max(0, Math.round(loc.box[1]) - padW);
+    var qf = [], qi;
+    for (qi = 0; qi < 4; qi++) {
+      qf.push([(mx0 + quadW[qi][0]) * sx - crop.x0, (my0 + quadW[qi][1]) * sy - crop.y0]);
+    }
+    if (hasPerspective(qf)) { quadFull = qf; }
+  }
+  res.maskQuad = quadW;
+  res.quad = quadFull;
+  if (quadFull) {
+    var qwT = hyp2(quadFull[1][0] - quadFull[0][0], quadFull[1][1] - quadFull[0][1]);
+    var qwB = hyp2(quadFull[2][0] - quadFull[3][0], quadFull[2][1] - quadFull[3][1]);
+    var qhL = hyp2(quadFull[3][0] - quadFull[0][0], quadFull[3][1] - quadFull[0][1]);
+    var qhR = hyp2(quadFull[2][0] - quadFull[1][0], quadFull[2][1] - quadFull[1][1]);
+    var ow = Math.round(64 * (qwT + qwB) / Math.max(1e-6, qhL + qhR));
+    crop = warpQuad(crop.data, crop.w, crop.h, 4, quadFull, clamp(ow, 24, 512), 64);
+    res.geom = 'perspective';
+  } else if (useAng !== 0) {
     var rotC = rotateLoose(crop.data, crop.w, crop.h, 4, useAng, true);
     var rotM = rotateLoose(maskC.data, mw, mh, 1, useAng, false);
     res.dbgRot = { w: rotC.w, h: rotC.h, data: rotC.data };
@@ -1175,6 +1464,9 @@ function run(imgData, options) {
       bwid = clamp(bwid, 1, rotC.w - bx); bhei = clamp(bhei, 1, rotC.h - by);
       crop = cropRGBA(rotC.data, rotC.w, rotC.h, [bx, by, bwid, bhei], 0);
     }
+    res.geom = 'rotate';
+  } else {
+    res.geom = 'none';
   }
   T.rotate = Date.now() - t2;
 
@@ -1230,6 +1522,8 @@ var API = {
     clahe: clahe, medfilt3: medfilt3, sobelVertical: sobelVertical,
     rotateLoose: rotateLoose, rgbaToGrayF: rgbaToGrayF, resize: resize,
     estimateSkew: estimateSkew, tightBox: tightBox, makeScratch: makeScratch,
+    detectQuad: detectQuad, hasPerspective: hasPerspective, warpQuad: warpQuad,
+    plateFormat: plateFormat, chooseCount: chooseCount,
     getTemplates: function () { return TEMPLATES; }
   }
 };

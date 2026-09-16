@@ -7,7 +7,7 @@
 打包内容:
     static/index.html, static/demo.jpg            -> 网页和示例图
     worker_lpr.m                                  -> 常驻识别进程
-    lpr_matlab 的 8 个 .m + templates.mat         -> 识别内核
+    lpr_matlab 的 9 个 .m + templates.mat         -> 识别内核
 运行时 lpr_server.py 会把它们释放到临时目录再调用 MATLAB, 所以用户只需要拷这一个文件。
 """
 
@@ -25,7 +25,7 @@ MLAB = next((os.path.join(ROOT, n) for n in ('matlab', 'lpr_matlab')
 
 CORE_FILES = ['lpr_main.m', 'locatePlate.m', 'cropPlate.m', 'correctPlate.m',
               'segmentChars.m', 'normalizeChar.m', 'charFeature.m',
-              'recognizeChars.m', 'templates.mat']
+              'recognizeChars.m', 'plateFormat.m', 'templates.mat']
 
 
 def collect():

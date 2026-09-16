@@ -66,16 +66,24 @@ fprintf('[2/5] 车牌位置: x=%d y=%d w=%d h=%d (矩形度 %.2f, 底色占比 %
 
 % ------------------------- 2. 裁剪 + 倾斜校正 -------------------------
 [plateGray, plateColor, plateMask] = cropPlate(I, plateBox, plateMask);
-[plateGray, plateColor] = correctPlate(plateGray, plateColor, plateMask);
-fprintf('[3/5] 校正后车牌: %d x %d\n', size(plateGray, 1), size(plateGray, 2));
+[plateGray, plateColor, cinfo] = correctPlate(plateGray, plateColor, plateMask);
+fprintf('[3/5] 校正后车牌: %d x %d (几何校正: %s, 倾角 %.2f°)\n', ...
+        size(plateGray, 1), size(plateGray, 2), cinfo.mode, cinfo.skew);
 
 % ------------------------- 3. 字符分割 -------------------------
-[charImages, bwPlate] = segmentChars(plateGray);
-fprintf('[4/5] 分割出 %d 个字符\n', numel(charImages));
+[charImages, bwPlate, ~, inkAR] = segmentChars(plateGray);
+fmt = plateFormat(numel(charImages));            % 按位数判定车牌制式(7 位普通 / 8 位新能源)
+fprintf('[4/5] 分割出 %d 个字符 (制式: %s)\n', numel(charImages), fmt.label);
 
 % ------------------------- 4. 字符识别 -------------------------
-[plateText, chars, scores] = recognizeChars(charImages);
-fprintf('[5/5] 识别结果: %s\n', plateText);
+% 按制式逐位限定候选字符集, 并用墨迹宽高比纠正 1/4 这类形状混淆
+[plateText, chars, scores] = recognizeChars(charImages, 'InkAR', inkAR, 'Format', fmt);
+if isempty(scores)
+    ms = 0;
+else
+    ms = mean(scores);
+end
+fprintf('[5/5] 识别结果: %s (%s, 平均置信度 %.2f)\n', plateText, fmt.label, ms);
 
 % ------------------------- 5. 组织输出 -------------------------
 results         = struct();
@@ -85,6 +93,9 @@ results.scores  = scores;
 results.plateBox= plateBox;
 results.plateImage = plateColor;
 results.charImages = charImages;
+results.format  = fmt.label;
+results.charCount = numel(charImages);
+results.correctInfo = cinfo;
 results.reason  = '';
 results.scoreInfo = scInfo;
 
@@ -99,6 +110,8 @@ function r = emptyResult()
 r = struct();
 r.text = ''; r.chars = {}; r.scores = []; r.plateBox = [];
 r.plateImage = []; r.charImages = {};
+r.format = ''; r.charCount = 0;
+r.correctInfo = struct('mode', 'none', 'quad', [], 'skew', 0);
 r.reason = ''; r.scoreInfo = struct();
 end
 

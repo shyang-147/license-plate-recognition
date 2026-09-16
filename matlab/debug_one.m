@@ -39,14 +39,21 @@ end
 fprintf('② 车牌定位: x=%d y=%d w=%d h=%d  (长宽比 %.2f)\n', round(box), box(3) / box(4));
 
 [gray, color, mask] = cropPlate(I, box, plateMask);
-[gray, color]  = correctPlate(gray, color, mask);
-fprintf('③ 校正后车牌: %d x %d\n', size(gray, 1), size(gray, 2));
+[gray, color, cinfo] = correctPlate(gray, color, mask);
+fprintf('③ 校正后车牌: %d x %d  (几何校正: %s', size(gray, 1), size(gray, 2), cinfo.mode);
+if strcmp(cinfo.mode, 'rotate')
+    fprintf(', 倾角 %.2f°', cinfo.skew);
+elseif ~isempty(cinfo.reason)
+    fprintf(', %s', cinfo.reason);
+end
+fprintf(')\n');
 
-[charImages, bwPlate, bounds] = segmentChars(gray);
+[charImages, bwPlate, bounds, inkAR] = segmentChars(gray);
+fmt = plateFormat(numel(charImages));
 fprintf('④ 二值化前景占比: %.1f%%\n', 100 * nnz(bwPlate) / numel(bwPlate));
-fprintf('⑤ 分割出 %d 个字符\n', numel(charImages));
+fprintf('⑤ 分割出 %d 个字符  (制式: %s)\n', numel(charImages), fmt.label);
 
-[text, charText, scores] = recognizeChars(charImages);
+[text, charText, scores] = recognizeChars(charImages, 'InkAR', inkAR, 'Format', fmt);
 fprintf('⑥ 识别结果: %s\n', text);
 for k = 1:numel(charText)
     fprintf('     第 %d 位: %s  (置信度 %.2f)\n', k, charText{k}, scores(k));
@@ -57,8 +64,13 @@ fig = figure('Name', ['车牌识别调试 - ' imagePath], 'NumberTitle', 'off', 
              'Position', [60 60 1280 700]);
 
 subplot(2, 3, 1);
-imshow(I); title('① 原图 + 定位框');
+imshow(I); title('① 原图 + 定位框(黄; 走了透视校正时再叠一个绿框)');
 rectangle('Position', box, 'EdgeColor', 'y', 'LineWidth', 2);
+if strcmp(cinfo.mode, 'perspective') && ~isempty(cinfo.quad)
+    % 透视校正用的四个角点(裁剪图坐标), 换算回原图坐标画出来
+    q = cinfo.quad + [box(1) - 1, box(2) - 1];
+    line([q(:, 1); q(1, 1)], [q(:, 2); q(1, 2)], 'Color', 'g', 'LineWidth', 1.5);
+end
 
 subplot(2, 3, 2);
 imshow(plateMask); title('② 车牌掩膜(定位得分最高的连通域)');

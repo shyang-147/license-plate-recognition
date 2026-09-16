@@ -1,38 +1,62 @@
-function [plateText, chars, scores] = recognizeChars(charImages, templateFile)
-%RECOGNIZECHARS 字符识别(模板匹配)
+function [plateText, chars, scores] = recognizeChars(charImages, varargin)
+%RECOGNIZECHARS 字符识别(模板匹配 + 车牌制式按位约束)
 %
 %   [plateText, chars, scores] = RECOGNIZECHARS(charImages)
+%   [plateText, chars, scores] = RECOGNIZECHARS(charImages, 'InkAR', inkAR, 'Format', F)
 %
-%   位置约定(按中国大陆车牌):
+%   可选参数:
+%       'TemplateFile'  模板文件路径, 默认用同目录的 templates.mat
+%       'InkAR'         1xN, 每个字符墨迹外接框的宽高比(segmentChars 的第 4 个输出)
+%       'Format'        plateFormat() 的返回值, 按位限制候选字符集
+%
+%   位置约定(按中国大陆车牌; 由 Format 给出, 不传 Format 时用下面的默认规则):
 %       第 1 位 : 中文省份简称(31 个)   -> 用 chinese 模板
 %       第 2 位 : 发牌机关代号(大写字母) -> 用 letters 模板
 %       第 3 位起: 字母或数字(去掉 I、O) -> 用 alnum 模板
+%       新能源 8 位牌的第 3 位也是字母(见 plateFormat.m)
 %
 %   匹配得分 = 0.65 * IoU(二值交并比) + 0.35 * 相关系数
 %   模板文件不存在时自动调用 buildTemplates 生成 templates.mat
 
-if nargin < 2 || isempty(templateFile)
-    templateFile = fullfile(fileparts(mfilename('fullpath')), 'templates.mat');
+p = inputParser;
+p.addParameter('TemplateFile', '');
+p.addParameter('InkAR', []);
+p.addParameter('Format', []);
+p.parse(varargin{:});
+opt = p.Results;
+
+if isempty(opt.TemplateFile)
+    opt.TemplateFile = fullfile(fileparts(mfilename('fullpath')), 'templates.mat');
 end
-S = loadTemplates(templateFile);
+S = loadTemplates(opt.TemplateFile);
 
 n = numel(charImages);
 chars  = repmat({'?'}, 1, n);
 scores = zeros(1, n);
 
 for k = 1:n
-    f = charFeature(charImages{k});
-    switch charType(k)
-        case 'chinese'
-            [lb, sc] = bestMatch(f, S.chinese);
-            if sc < 0.45
-                lb = '*';        % 置信度过低, 用 * 占位
+    f   = charFeature(charImages{k});
+    set = positionSet(S, opt.Format, k);      % 只在该位允许的字符里找最优
+    [lb, sc] = bestMatch(f, set);
+
+    % 极细长的墨迹段(外接框宽高比 < 0.30)基本只可能是数字 1:
+    % normalizeChar 的 'fill' 模式会把它横向拉宽, 容易被认成 4/7,
+    % 这里给 "1" 一个小加分把这个偏差纠回来(只影响极窄的段)。
+    if k >= 2 && numel(opt.InkAR) >= k && opt.InkAR(k) > 0 && opt.InkAR(k) < 0.30
+        sub = restrict(set, '1');
+        if ~isempty(sub.label)
+            [lb1, sc1] = bestMatch(f, sub);
+            if sc1 + 0.06 > sc
+                lb = lb1;  sc = sc1;
             end
-        case 'letter'
-            [lb, sc] = bestMatch(f, S.letters);
-        otherwise
-            [lb, sc] = bestMatch(f, S.alnum);
+        end
     end
+
+    % 首位汉字置信度过低 -> 用 * 占位, 提示这一位不可信
+    if k == 1 && sc < 0.45
+        lb = '*';
+    end
+
     chars{k}  = lb;
     scores(k) = sc;
 end
@@ -42,13 +66,34 @@ end
 
 % ======================== 局部函数 ========================
 
-function t = charType(k)
+function set = positionSet(S, F, k)
+%POSITIONSET 取第 k 位允许的模板集合: 先按位选模板组, 再用制式字符串收窄
 if k == 1
-    t = 'chinese';
+    set = S.chinese;
 elseif k == 2
-    t = 'letter';
+    set = S.letters;
 else
-    t = 'alnum';
+    set = S.alnum;
+end
+if ~isempty(F) && isstruct(F) && isfield(F, 'sets') && ...
+        k <= numel(F.sets) && ~isempty(F.sets{k})
+    narrow = restrict(set, F.sets{k});
+    if ~isempty(narrow.label)
+        set = narrow;
+    end
+end
+end
+
+function set = restrict(set, allowed)
+%RESTRICT 只保留标签出现在 allowed 里的模板; 无交集时原样返回
+if isempty(allowed) || isempty(set.label), return; end
+keep = false(1, numel(set.label));
+for i = 1:numel(set.label)
+    keep(i) = any(set.label{i} == allowed);
+end
+if any(keep)
+    set.label   = set.label(keep);
+    set.feature = set.feature(keep);
 end
 end
 

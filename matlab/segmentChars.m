@@ -1,4 +1,4 @@
-function [charImages, bwPlate, bounds] = segmentChars(plateGray)
+function [charImages, bwPlate, bounds, inkAR] = segmentChars(plateGray)
 %SEGMENTCHARS 车牌字符分割(垂直投影法)
 %
 %   [charImages, bwPlate, bounds] = SEGMENTCHARS(plateGray)
@@ -6,14 +6,15 @@ function [charImages, bwPlate, bounds] = segmentChars(plateGray)
 %   charImages: 1xN cell, 每个元素是 32x16 logical 的归一化字符
 %   bwPlate   : 二值化结果(字符=白), 便于调试查看
 %   bounds    : N x 2, 每个字符在车牌中的列区间 [起 止]
+%   inkAR     : 1xN double, 每个字符墨迹外接框的宽高比(细长段 -> 数字 1)
 %
 %   流程: 光照均衡 -> Otsu 二值化 -> 统一极性 -> 去外框 -> 去噪
-%         -> 垂直投影取字符段 -> 按估计字数拆分/合并 -> 归一化
+%         -> 垂直投影取字符段 -> 自校准定字数并拆分/合并 -> 归一化
 %
 %   关键参数都在下面注释里标了, 分割不对时优先调这三处:
 %     1) mergeRuns 的间隙阈值  (汉字被切散 -> 调大; 相邻字粘连 -> 调小)
 %     2) 列阈值 thr            (窄笔画如数字 1 的撇被切掉 -> 调小)
-%     3) 估算字数 nEst         (新能源 8 位牌 / 特殊制式)
+%     3) chooseCount 的候选范围 (目前 6~8, 双排牌切错时可临时收窄)
 
 if size(plateGray, 3) > 1
     plateGray = rgb2gray(plateGray);
@@ -53,20 +54,25 @@ runs = mergeRuns(runs, max(2, round(0.020 * W)));
 w = runs(:, 2) - runs(:, 1) + 1;
 runs = runs(w >= max(2, round(0.015 * W)), :);
 
-% ---------------- 5. 按估计字数拆分/合并 ----------------
+% ---------------- 5. 定字数, 再按字数拆分/合并 ----------------
+% 不要用 span/W 这类固定比例估字数: 7 位普通牌与 8 位新能源牌裁紧后
+% span/W 都在 0.87 左右, 固定比例必然把 8 位牌(新能源绿牌)当成 7 位,
+% 结果是被强制合并掉一个字, 整牌全错。改成用切分结果自校准(见 chooseCount)。
 if ~isempty(runs)
-    span = runs(end, 2) - runs(1, 1) + 1;
-    % 中国车牌单字宽约 0.10*W, 含字间距后每个字约占 0.125*W
-    nEst = min(8, max(6, round(span / (0.125 * W))));
-    runs = adjustToCount(runs, proj, nEst);
+    runs = chooseCount(runs, proj);
 end
 bounds = runs;
 
 % ---------------- 6. 输出归一化字符 ----------------
 n = size(runs, 1);
 charImages = cell(1, n);
+inkAR      = zeros(1, n);
 for k = 1:n
     seg = bw(:, runs(k, 1):runs(k, 2));
+    [rr, cc] = find(seg);
+    if ~isempty(rr)
+        inkAR(k) = (max(cc) - min(cc) + 1) / (max(rr) - min(rr) + 1);
+    end
     charImages{k} = normalizeChar(seg, 32, 16, 2, 'fill');
 end
 end
@@ -91,6 +97,29 @@ if any(frame(:))
     frame = imdilate(frame, strel('square', 3));
     bw = bw & ~frame;
 end
+end
+
+function runs = chooseCount(runs, proj)
+%CHOOSECOUNT 在 6~8 之间挑一个最合理的字符数
+%   判据: 相邻字符"中心间距"越均匀越好。两个字被并成一段(间距约 2 倍),
+%   或一个字被切成两段(间距约 0.5 倍), 都会让间距忽大忽小; 所以间距的
+%   变异系数(标准差/均值)最小的那个候选, 就是最可能的真实字数。
+%   这样 7 位普通牌和 8 位新能源牌都能自适应, 不依赖 span/W 固定比例
+%   (裁紧后两者的 span/W 都在 0.87 左右, 固定比例必然把 8 位牌当成 7 位)。
+%   试过把"各段宽度是否均匀"也加进判据: 基准集与难集的字符数正确率都变差,
+%   说明二值化后笔画粘连/断裂导致的宽度抖动, 比"字被劈成两半"更常见。
+best = inf; bestRuns = runs;
+for n = 6:8
+    r = adjustToCount(runs, proj, n);
+    if size(r, 1) ~= n, continue; end
+    d = diff(mean(r, 2));
+    if numel(d) < 3, continue; end
+    cv = std(d) / max(eps, mean(d));
+    if cv < best - 1e-9
+        best = cv;  bestRuns = r;
+    end
+end
+runs = bestRuns;
 end
 
 function runs = logicalRuns(act)

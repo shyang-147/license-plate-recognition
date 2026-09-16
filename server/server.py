@@ -399,6 +399,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # 下面 finally 里要立"正在关机"标志，拦住请求线程再去拉新的 MATLAB，
+    # 这里必须声明 global，否则那个赋值只会建一个函数内的局部变量。
+    global _shutting_down
     for d in (JOBS, IN_DIR, RES_DIR, UPLOADS):
         os.makedirs(d, exist_ok=True)
     if not MATLAB:
