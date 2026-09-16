@@ -79,6 +79,8 @@ if k == 1
     set = S.chinese;
 elseif k == 2
     set = S.letters;
+elseif isfield(S, 'alnumSpecial')
+    set = S.alnumSpecial;      % 数字/字母 + 末位制式后缀(警), 由 Format 收窄
 else
     set = S.alnum;
 end

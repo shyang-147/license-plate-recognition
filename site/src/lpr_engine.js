@@ -1051,7 +1051,10 @@ function plateFormat(n) {
   } else if (n === 7) {
     label = '普通 7 位';
     sets = [PLATE_PROV, PLATE_LETTERS];
-    for (k = 2; k < 7; k++) { sets.push(PLATE_ALNUM); }
+    for (k = 2; k < 6; k++) { sets.push(PLATE_ALNUM); }
+    /* 末位多给一个"警": 警用汽车号牌 京A3454警 是 7 位(白底黑字 + 红警),
+       后缀字只会出现在最后一位 */
+    sets.push(PLATE_ALNUM + '警');
   } else {
     label = n + ' 位(未收录制式)';
     for (k = 0; k < n; k++) {
@@ -1075,7 +1078,9 @@ function restrictSet(set, allowed) {
 
 /* 第 k 位允许的模板集合: 先按位选模板组, 再用制式收窄 */
 function positionSet(S, fmt, k) {
-  var set = (k === 0) ? S.chinese : (k === 1 ? S.letters : S.alnum);
+  /* 第 3 位起用"数字/字母 + 制式后缀字(警)"的合集, 再由制式收窄: 普通号牌只
+     允许数字字母, 后缀字会被过滤掉, 结果与以前完全一致 */
+  var set = (k === 0) ? S.chinese : (k === 1 ? S.letters : (S.alnumSpecial || S.alnum));
   if (fmt && fmt.sets && k < fmt.sets.length) { set = restrictSet(set, fmt.sets[k]); }
   return set;
 }
@@ -1116,12 +1121,18 @@ function setTemplates(json) {
     outH: json.outH, outW: json.outW,
     chinese: prepSet(json.chinese.labels, json.chinese.feat),
     letters: prepSet(json.letters.labels, json.letters.feat),
-    digits: prepSet(json.digits.labels, json.digits.feat)
+    digits: prepSet(json.digits.labels, json.digits.feat),
+    special: (json.special && json.special.labels)
+      ? prepSet(json.special.labels, json.special.feat) : null
   };
   S.alnum = {
     labels: S.letters.labels.concat(S.digits.labels),
     items: S.letters.items.concat(S.digits.items)
   };
+  S.alnumSpecial = S.special
+    ? { labels: S.alnum.labels.concat(S.special.labels),
+        items: S.alnum.items.concat(S.special.items) }
+    : S.alnum;
   TEMPLATES = S;
   return S;
 }

@@ -21,19 +21,30 @@ digits  = '0':'9';
 prov = {'京','津','冀','晋','蒙','辽','吉','黑','沪','苏','浙','皖','闽','赣', ...
         '鲁','豫','鄂','湘','粤','桂','琼','渝','川','贵','云','藏','陕','甘', ...
         '青','宁','新'};
+% 制式后缀汉字(警用/挂车/教练/使领馆): 只出现在号牌最后一位, 平时不参与匹配,
+% 由 plateFormat 决定哪些制式允许出现在哪一位 —— 所以多渲染这几个字不会影响
+% 普通号牌的识别结果(见 recognizeChars 的 positionSet)。
+special = {'警','挂','学','领','使'};
 
-fprintf('    渲染 %d 字母 / %d 数字 / %d 汉字 ...\n', ...
-        numel(letters), numel(digits), numel(prov));
+fprintf('    渲染 %d 字母 / %d 数字 / %d 汉字 / %d 后缀字 ...\n', ...
+        numel(letters), numel(digits), numel(prov), numel(special));
 
 T = struct();
 T.letters = packSet(num2cell(letters), fontLatin);
 T.digits  = packSet(num2cell(digits),  fontLatin);
 T.chinese = packSet(prov,              fontChinese);
+T.special = packSet(special,           fontChinese);
 
 % 注意: 不能用 struct('label', {cellArray}) 的形式, 那会生成 struct 数组
 T.alnum         = struct();
 T.alnum.label   = [T.letters.label,   T.digits.label];
 T.alnum.feature = [T.letters.feature, T.digits.feature];
+
+% 第 3 位及以后的可选集合: 数字/字母 + 制式后缀汉字。识别时先用 plateFormat
+% 给的允许字符集收窄, 普通号牌只含数字字母, 后缀字会被过滤掉, 结果与以前一致。
+T.alnumSpecial         = struct();
+T.alnumSpecial.label   = [T.alnum.label,   T.special.label];
+T.alnumSpecial.feature = [T.alnum.feature, T.special.feature];
 
 T.info = struct('created', datestr(now), 'version', 2, ...
                 'fontLatin', fontLatin, 'fontChinese', fontChinese);

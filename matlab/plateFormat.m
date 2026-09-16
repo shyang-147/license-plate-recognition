@@ -11,6 +11,8 @@ function F = plateFormat(n)
 %   依据(公安部 GA 36-2018):
 %       普通汽车(蓝底/黄底单排)  7 位 = 省简称 + 发牌机关字母 + 5 位字母数字
 %       新能源小型车(绿底单排)   8 位 = 省简称 + 发牌机关字母 + 字母 + 5 位字母数字
+%       警用汽车(白底)           7 位 = 省简称 + 发牌机关字母 + 4 位数字 + 警
+%       挂车/教练车等同理, 末位是制式后缀汉字(见 buildTemplates 的 special)
 %   字母表里不含 I 和 O —— 车牌不使用这两个字母(易与 1、0 混淆)。
 %
 %   这个表有两个用处:
@@ -20,6 +22,7 @@ function F = plateFormat(n)
 prov    = '京津冀晋蒙辽吉黑沪苏浙皖闽赣鲁豫鄂湘粤桂琼渝川贵云藏陕甘青宁新';
 letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';           % 去掉 I O
 alnum   = [letters, '0123456789'];
+suffix  = '警';                                 % 末位制式后缀(目前只启用了警用)
 
 F = struct('n', n, 'label', '', 'sets', {{}});
 switch n
@@ -28,7 +31,9 @@ switch n
         F.sets  = {prov, letters, letters, alnum, alnum, alnum, alnum, alnum};
     case 7
         F.label = '普通 7 位';
-        F.sets  = {prov, letters, alnum, alnum, alnum, alnum, alnum};
+        % 末位多给一个"警": 警用汽车号牌 京A3454警 是 7 位, 白底黑字+红警。
+        % 其它位置不放后缀字 —— 后缀只会出现在最后一位。
+        F.sets  = {prov, letters, alnum, alnum, alnum, alnum, [alnum, suffix]};
     otherwise
         % 没收录的位数(双排黄牌切错、图片有问题等): 只给个宽松规则, 不硬套
         F.label = sprintf('%d 位(未收录制式)', n);
