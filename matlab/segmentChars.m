@@ -82,24 +82,31 @@ end
 function bw = removeFrame(bw)
 %REMOVEFRAME 抹掉车牌外框, 分三步:
 %   1) 清掉最外圈 2~3 像素(车牌外框通常紧贴车牌边缘)
-%   2) 外圈窄带内清"超长笔画": 外 6% 宽度的列里连续笔画超过 0.60*H 的判为
-%      左右边框, 外 12% 高度的行里连续笔画超过 0.35*W 的判为上下边框
+%   2) 整块删掉"贴着外沿的细长连通域", 三项同时成立才算边框残留:
+%        (a) 外接框触到外圈 ring+1 以内(车牌外框 / 白边一定贴边)
+%        (b) 最长边 >= 0.30*H
+%        (c) 满足任一"纤细"判据:
+%              面积 / 最长边 <= 4.5 px   (细长残段, 如被 JPEG 打断的下边框)
+%              面积 / 周长   <= 1.5 px   (线条状, 如闭合的矩形外框白线)
+%      判据细节见 removeEdgeSlivers。
 %   3) 全图再做一次长线开运算(水平 0.60*W / 垂直 0.85*H), 清完整的外框线
 %
-%   第 2 步的水平阈值(0.35*W)必须比第 3 步(0.60*W)松, 否则实拍图会漏:
-%   真实牌照的边框被 JPEG 与模糊打断成几段 —— 实测 real01 的下边框断成 51 px
-%   和 142 px 两段, 都短于 0.60*W 的核长, 只靠第 3 步的"连续长线"判据整条边框
-%   都会留下来, 把每个字符的墨迹包围盒从 42 行撑到 58 行, 归一化时字符被纵向
-%   压扁, 模板匹配得分从 0.7 掉到 0.3。
-%   判据用"最长的连续笔画"而不是"整行墨迹总量", 是因为后者会被相邻字符底部
-%   对齐的行误触发(合成集里这类行的墨迹率最高到 0.57*W, 与真实边框线分不开)。
-%   数字 1 的竖线约占 0.70*H, 但它落在车牌中部, 不进外圈窄带, 不会被误删。
+%   第 2 步原来按"外圈窄带内清超长笔画"(垂直 0.60*H / 水平 0.35*W)判断, 有两个毛病:
+%   一是实拍牌照的边框被 JPEG 与模糊打断成几段, 每一段都短于阈值, 整条边框留了
+%   下来(实测 real01 的下边框断成 51 px 和 142 px 两段), 把每个字符的墨迹包围盒从
+%   42 行撑到 58 行, 归一化时字符被纵向压扁, 模板匹配得分从 0.7 掉到 0.3;
+%   二是它只看"某一行 / 某一列的连续段", 斜边框每行只占 1~2 px, 长度判据根本检
+%   不出来, 反过来又会因为某行笔画长就把整行抹掉 —— 合成图 bench01 左下角留下的
+%   1 px 宽、23 px 高的边框残端, 就是被它漏掉后又当成独立字符, 使 7 位牌切出 8 段。
+%   改成按连通域判断后: 边框残渣又长又薄(实测多为 1~2 px 厚)会被整块删掉; 字符
+%   笔画有 4~6 px 厚, 即使贴到边也会放行。
+%   数字 1 的竖线约占 0.70*H, 但它落在车牌中部, 不贴外沿, 不会被误删。
 [H, W] = size(bw);
 ring = max(2, round(0.03 * H));
 bw(1:ring, :) = false;      bw(end - ring + 1:end, :) = false;
 bw(:, 1:ring) = false;      bw(:, end - ring + 1:end) = false;
 
-bw = clearBandRuns(bw);
+bw = removeEdgeSlivers(bw, ring, 0.30 * H, 4.5, 1.5);
 
 hLine = imopen(bw, strel('line', max(5, round(0.60 * W)), 0));   % 完整水平外框
 vLine = imopen(bw, strel('line', max(5, round(0.85 * H)), 90));  % 完整垂直外框
@@ -110,34 +117,42 @@ if any(frame(:))
 end
 end
 
-function bw = clearBandRuns(bw)
-%CLEARBANDRUNS 只在外圈窄带里清超长笔画(车牌边框必然贴边, 字符都在中部)
+function bw = removeEdgeSlivers(bw, ring, minLen, maxThick, maxLineT)
+%REMOVEEDGESLIVERS 整块删掉"贴着车牌外沿、又长又细"的连通域(车牌外框 / 白边残留)
+%
+%   bw       : 已经清掉最外圈 ring 像素的二值车牌
+%   minLen   : 最长边短于它的连通域一律不动(噪点、牌照上的小铆钉等)
+%   maxThick : "平均厚度 = 面积 / 最长边"不超过它, 判为细长残段
+%   maxLineT : "线宽 = 面积 / 周长"不超过它, 判为线条状(闭合外框线)
+%
+%   判据要三项同时成立: 贴边 + 够长 + 够细。两个厚度判据是"或"的关系:
+%     * 被打断的下边框这类细长残段 -> 面积/最长边 很小;
+%     * 闭合的矩形外框白线       -> 面积/最长边 约为真实线宽的 2 倍
+%       (长边、短边的面积都算进分子, 却只除以一条长边), 实测 6.8 > 4.5,
+%       单靠上式会整条漏掉; 而 面积/周长 对任何细线都约等于真实线宽
+%       (实测外框 1.26, 汉字笔画 1.67~2.2), 所以补上这一条。
+%   贴边但很粗的连通域 = 字符被裁到了边, 放行。
 [H, W] = size(bw);
-bandX = max(2, round(0.06 * W));
-bandY = max(2, round(0.12 * H));
-cols = unique([1:min(bandX, W), max(1, W - bandX + 1):W]);
-rows = unique([1:min(bandY, H), max(1, H - bandY + 1):H]);
-for x = cols
-    bw(:, x) = clearLongRuns(bw(:, x), 0.60 * H);
-end
-for y = rows
-    bw(y, :) = clearLongRuns(bw(y, :), 0.35 * W);
-end
-end
-
-function v = clearLongRuns(v, thr)
-%CLEARLONGRUNS 把长度超过 thr 的连续 true 段整段置 false(保持输入的行/列方向)
-wasCol = size(v, 2) == 1;
-w = v(:)';
-d = diff([false, w, false]);
-s = find(d == 1);
-e = find(d == -1) - 1;
-for i = 1:numel(s)
-    if e(i) - s(i) + 1 > thr
-        w(s(i):e(i)) = false;
+[L, n] = bwlabel(bw, 8);
+if n == 0, return; end
+st = regionprops(L, 'Area', 'BoundingBox', 'Perimeter');
+drop = false(1, n);
+for i = 1:n
+    bb = st(i).BoundingBox;                  % [x y w h], 边界为像素边缘
+    x0 = bb(1) + 0.5;      x1 = bb(1) + bb(3) - 0.5;
+    y0 = bb(2) + 0.5;      y1 = bb(2) + bb(4) - 0.5;
+    touches = x0 <= ring + 1 || y0 <= ring + 1 || x1 >= W - ring || y1 >= H - ring;
+    if ~touches, continue; end
+    len = max(bb(3), bb(4));
+    if len < minLen, continue; end
+    a = st(i).Area;
+    if a / len <= maxThick || a / max(st(i).Perimeter, 1) <= maxLineT
+        drop(i) = true;
     end
 end
-if wasCol, v = w(:); else, v = w; end
+if any(drop)
+    bw = bw & ~ismember(L, find(drop));
+end
 end
 
 function runs = chooseCount(runs, proj)

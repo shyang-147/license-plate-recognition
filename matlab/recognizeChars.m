@@ -39,14 +39,21 @@ for k = 1:n
     set = positionSet(S, opt.Format, k);      % 只在该位允许的字符里找最优
     [lb, sc] = bestMatch(f, set);
 
-    % 极细长的墨迹段(外接框宽高比 < 0.30)基本只可能是数字 1:
-    % normalizeChar 的 'fill' 模式会把它横向拉宽, 容易被认成 4/7,
-    % 这里给 "1" 一个小加分把这个偏差纠回来(只影响极窄的段)。
+    % 极细长的墨迹段基本只可能是数字 1 —— 车牌上唯一"又窄又高"的字符就是 1,
+    % 字母 I 已被排除。normalizeChar 的 'fill' 模式会把这种窄段横向拉宽成实心
+    % 方块(实测用户照片里 AR=0.132 的 1 被拉宽后更像 8/4/0, 对模板 "1" 的得分
+    % 只有 0.31, 而 8 拿到 0.51), 所以这里按宽度分两档处理:
+    %   AR < 0.22  : 直接判定为 1。逐图实测(见 README"已知限制")所有数据集里
+    %                第 2 位起、AR < 0.22 的段 100% 都是 1。
+    %   0.22~0.30  : 只给 "1" 一个小加分, 不强制 —— 新能源牌被纵向压缩时
+    %                D/Q/5/9/F/G 的 AR 也会掉到 0.25 左右, 强制会误伤它们。
     if k >= 2 && numel(opt.InkAR) >= k && opt.InkAR(k) > 0 && opt.InkAR(k) < 0.30
         sub = restrict(set, '1');
         if ~isempty(sub.label)
             [lb1, sc1] = bestMatch(f, sub);
-            if sc1 + 0.06 > sc
+            if opt.InkAR(k) < 0.22
+                lb = lb1;  sc = sc1;
+            elseif sc1 + 0.06 > sc
                 lb = lb1;  sc = sc1;
             end
         end
@@ -115,6 +122,11 @@ end
 
 function [label, score] = bestMatch(f, set)
 label = '?'; score = -inf;
+% 二值化阈值保持 0.5(模板也用它)。曾经为了找回被降采样"磨淡"的 1 px 细横画
+% 把它降到 0.35~0.45, 但实测(见 README"已知限制")在修好去外框之后:
+%   阈值 0.50 -> bench 0.850/0.979, hard 0.667/0.833, real 字符 0.045
+%   阈值 0.35 -> bench 0.850/0.979, hard 0.500/0.805, real 字符 0.000
+% 降阈值只会把笔画喂胖(3 变 8、0 变 9), 所以维持 0.5。
 fb = f > 0.5;
 for i = 1:numel(set.label)
     g  = set.feature{i};
