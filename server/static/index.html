@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车牌识别 · MATLAB LPR</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b23; --panel2:#1d232d; --line:#2a323d;
+    --fg:#e6edf3; --dim:#8b96a5; --acc:#4c8dff; --ok:#3fb950; --warn:#d29922; --err:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#16233a 0%,var(--bg) 55%);
+       color:var(--fg);font:15px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;min-height:100vh}
+  .wrap{max-width:1180px;margin:0 auto;padding:26px 20px 60px}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+  h1{font-size:21px;margin:0;font-weight:650;letter-spacing:.5px}
+  h1 span{color:var(--acc)}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;
+        background:var(--panel);border:1px solid var(--line);font-size:13px;color:var(--dim)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+  .dot.idle{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.busy{background:var(--warn);box-shadow:0 0 8px var(--warn);animation:blink 1s infinite}
+  .dot.off{background:var(--err)}
+  @keyframes blink{50%{opacity:.25}}
+  .grid{display:grid;grid-template-columns:minmax(320px,1fr) minmax(320px,1.15fr);gap:20px}
+  @media(max-width:880px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;
+        box-shadow:0 8px 26px rgba(0,0,0,.28)}
+  .card h2{margin:0 0 14px;font-size:14px;font-weight:600;color:var(--dim);letter-spacing:1px}
+  #drop{border:2px dashed #35405180;border-radius:12px;padding:30px 16px;text-align:center;
+        cursor:pointer;transition:.18s;background:#12171f}
+  #drop:hover,#drop.over{border-color:var(--acc);background:#152033}
+  #drop b{color:var(--acc)}
+  #drop small{color:var(--dim);display:block;margin-top:8px;font-size:12.5px;line-height:1.7}
+  #preview{display:none;margin-top:14px}
+  #preview img{width:100%;border-radius:10px;display:block;border:1px solid var(--line)}
+  .row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+  button{font:inherit;border:0;border-radius:10px;padding:11px 20px;cursor:pointer;transition:.15s}
+  #go{background:var(--acc);color:#fff;font-weight:600;flex:1;min-width:150px}
+  #go:hover:not(:disabled){background:#3d7ef0}
+  #go:disabled{background:#2b3442;color:#6d7684;cursor:not-allowed}
+  .ghost{background:var(--panel2);color:var(--fg);border:1px solid var(--line)}
+  .ghost:hover{background:#232b36}
+  .plate{font:700 40px/1.25 "Consolas","Microsoft YaHei",monospace;letter-spacing:5px;
+         background:linear-gradient(180deg,#2b6fd6,#1b4ea0);color:#fff;text-align:center;
+         padding:20px 12px;border-radius:12px;border:3px solid #f2f2f2;
+         text-shadow:0 2px 6px rgba(0,0,0,.35);word-break:break-all}
+  .plate.empty{background:#1b202a;border-color:#2a323d;color:#5d6673;font-size:22px;letter-spacing:2px}
+  .chars{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 6px;
+        width:66px;text-align:center}
+  .chip img{width:100%;border-radius:5px;background:#000;display:block}
+  .chip .c{font:700 19px/1.5 Consolas,monospace;color:var(--fg)}
+  .bar{height:4px;border-radius:3px;background:#2c3542;overflow:hidden;margin:4px 3px 3px}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,#3fb950,#d29922);border-radius:3px}
+  .chip .s{font-size:11px;color:var(--dim)}
+  .meta{display:flex;gap:16px;flex-wrap:wrap;color:var(--dim);font-size:13px;margin-top:14px}
+  .meta b{color:var(--fg);font-weight:600}
+  .crop{margin-top:14px}
+  .crop img{width:100%;border-radius:9px;border:1px solid var(--line);display:block}
+  .crop div,.json summary{color:var(--dim);font-size:12.5px;margin-bottom:6px}
+  .json{margin-top:14px}
+  .json pre{background:#0c1017;border:1px solid var(--line);border-radius:9px;padding:12px;
+            font:12.5px/1.6 Consolas,monospace;color:#9fb4cf;overflow:auto;max-height:260px;margin:0}
+  #spin{display:none;align-items:center;gap:10px;margin-top:14px;color:var(--dim);font-size:13.5px}
+  #spin.on{display:flex}
+  .ldr{width:16px;height:16px;border:2px solid #33405a;border-top-color:var(--acc);border-radius:50%;
+       animation:spin .8s linear infinite;flex:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #msg{margin-top:14px;padding:11px 14px;border-radius:10px;font-size:13.5px;display:none}
+  #msg.err{display:block;background:#3a1a1d;border:1px solid #6b2b31;color:#ffb4b0}
+  #msg.warn{display:block;background:#3a311a;border:1px solid #6b5a2b;color:#f2d98a}
+  #hist{margin-top:22px;display:grid;gap:8px}
+  .hrow{display:grid;grid-template-columns:76px 1fr auto;gap:12px;align-items:center;
+        background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13.5px}
+  .hrow img{height:30px;border-radius:4px}
+  .hrow .t{font:600 15px Consolas,monospace;letter-spacing:2px}
+  .hrow .f{color:var(--dim);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  footer{color:var(--dim);font-size:12.5px;margin-top:30px;line-height:1.9}
+  code{background:#1d232d;padding:2px 6px;border-radius:5px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>车牌识别 <span>· MATLAB</span></h1>
+    <span class="pill"><i class="dot" id="dot"></i><span id="stat">正在连接…</span></span>
+    <span class="pill" id="plat">识别引擎：MATLAB <code>lpr_main</code></span>
+  </header>
+
+  <div class="grid">
+    <!-- 左：上传 -->
+    <div class="card">
+      <h2>1 · 选择车牌照片</h2>
+      <div id="drop">
+        <b>点击选择</b> 或把图片拖到这里
+        <small>支持 JPG / PNG / BMP / TIF，单张 ≤ 20MB<br>也可以直接 <b>Ctrl+V</b> 粘贴截图</small>
+      </div>
+      <input type="file" id="file" accept="image/*" hidden>
+      <div class="row"><button class="ghost" id="demo">用示例照片</button></div>
+
+      <div id="preview">
+        <img id="pimg" alt="预览">
+      </div>
+
+      <div class="row">
+        <button id="go" disabled>开始识别</button>
+        <button class="ghost" id="clr">清空</button>
+      </div>
+
+      <div id="spin"><i class="ldr"></i><span id="spinTxt">识别中…</span></div>
+      <div id="msg"></div>
+    </div>
+
+    <!-- 右：结果 -->
+    <div class="card">
+      <h2>2 · 识别结果</h2>
+      <div class="plate empty" id="plate">等待上传照片…</div>
+      <div class="chars" id="chars"></div>
+      <div class="meta" id="meta" style="display:none">
+        <span>字符数 <b id="mN">-</b></span>
+        <span>识别耗时 <b id="mT">-</b></span>
+        <span>端到端 <b id="mE">-</b></span>
+        <span title="矩形度 / 车牌底色占比。两者同时达标才判定为真车牌, 用来挡住噪声蓝天路面一类的假候选">定位质量 <b id="mQ">-</b></span>
+      </div>
+      <div class="crop" id="cropBox" style="display:none">
+        <div>定位并校正后的车牌</div>
+        <img id="cimg" alt="车牌">
+      </div>
+      <details class="json" id="jsonBox" style="display:none">
+        <summary>原始 JSON 结果</summary>
+        <pre id="json"></pre>
+      </details>
+    </div>
+  </div>
+
+  <div id="hist"></div>
+
+  <footer>
+    识别流程：车牌定位 → 倾斜校正 → 字符分割 → 字符识别（本机 MATLAB 实时计算，图片不上传云端）。<br>
+    识别不准时，可在 MATLAB 里运行 <code>debug_one('图片路径')</code> 查看每一步的中间结果。<br>
+    提示未检测到车牌时会给出具体原因: 候选区域的矩形度与车牌底色占比没有同时达标, 就不会硬猜一个车牌号。
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let curFile = null;
+let polling = null;
+
+/* ---------- 引擎状态 ---------- */
+async function pollStatus(){
+  try{
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    $('dot').className = 'dot ' + (s.worker === 'idle' ? 'idle' : s.worker === 'busy' ? 'busy' : 'off');
+    $('stat').textContent = s.worker === 'idle' ? '引擎空闲，可以识别'
+                          : s.worker === 'busy' ? '正在识别…'
+                          : '引擎未启动（首次识别会自动启动）';
+    if (s.worker === 'busy') $('spinTxt').textContent = 'MATLAB 正在识别…';
+  }catch(e){
+    $('dot').className = 'dot off'; $('stat').textContent = '无法连接后端';
+  }
+}
+pollStatus();
+polling = setInterval(pollStatus, 2000);
+
+/* ---------- 选图 ---------- */
+function pick(file){
+  if(!file || !file.type.startsWith('image/')){ showMsg('请选择图片文件', 'err'); return; }
+  curFile = file;
+  $('pimg').src = URL.createObjectURL(file);
+  $('preview').style.display = 'block';
+  $('go').disabled = false;
+  $('msg').className = ''; $('msg').style.display = 'none';
+  $('plate').className = 'plate empty'; $('plate').textContent = '等待识别…';
+  $('chars').innerHTML = ''; $('cropBox').style.display = 'none';
+  $('meta').style.display = 'none'; $('jsonBox').style.display = 'none';
+  clearInterval(polling); pollStatus();
+}
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => pick(e.target.files[0]);
+['dragenter','dragover'].forEach(t => $('drop').addEventListener(t, e => {
+  e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave','drop'].forEach(t => $('drop').addEventListener(t, e => {
+  e.preventDefault(); $('drop').classList.remove('over'); }));
+$('drop').addEventListener('drop', e => { if(e.dataTransfer.files[0]) pick(e.dataTransfer.files[0]); });
+document.addEventListener('paste', e => {
+  for(const it of (e.clipboardData?.items || [])){
+    if(it.type.startsWith('image/')){ pick(it.getAsFile()); break; }
+  }
+});
+$('clr').onclick = () => {
+  curFile = null; $('preview').style.display = 'none'; $('go').disabled = true;
+  $('plate').className = 'plate empty'; $('plate').textContent = '等待上传照片…';
+  $('chars').innerHTML = ''; $('cropBox').style.display = 'none';
+  $('meta').style.display = 'none'; $('jsonBox').style.display = 'none';
+  $('msg').className = ''; $('msg').style.display = 'none';
+  $('file').value = '';
+};
+
+/* ---------- 示例图 ---------- */
+$('demo').onclick = async () => {
+  try{
+    const r = await fetch('/static/demo.jpg');
+    if(!r.ok) throw new Error('示例图片不在 static/demo.jpg');
+    const b = await r.blob();
+    pick(new File([b], 'demo_plate.jpg', {type:'image/jpeg'}));
+  }catch(e){ showMsg('示例图片加载失败：' + e.message, 'err'); }
+};
+
+/* ---------- 提示 ---------- */
+function showMsg(t, kind){
+  // 注意: 这里的 style.display 必须清空, 否则会被之前设过的
+  // 内联 display:none 覆盖, 提示文字永远显示不出来(W3C 优先级: 内联 > 类)。
+  const m = $('msg');
+  m.textContent = t;
+  m.className = kind || '';
+  m.style.display = t ? '' : 'none';
+}
+
+/* ---------- 识别 ---------- */
+$('go').onclick = async () => {
+  if(!curFile) return;
+  $('go').disabled = true;
+  $('spin').classList.add('on');
+  $('spinTxt').textContent = '正在提交…';
+  $('msg').className = ''; $('msg').style.display = 'none';
+
+  // 首次识别要等 MATLAB 启动，这里根据引擎状态给出提示
+  const hints = setInterval(async () => {
+    try{
+      const s = await (await fetch('/api/status')).json();
+      $('spinTxt').textContent = s.worker === 'off'
+        ? '正在启动 MATLAB 识别引擎（首次约 10 秒）…'
+        : s.worker === 'busy' ? 'MATLAB 正在识别（定位→校正→分割→识别）…'
+        : '正在等待结果…';
+    }catch(e){}
+  }, 900);
+
+  try{
+    const t0 = performance.now();
+    const res = await fetch('/api/recognize', {
+      method:'POST',
+      headers:{'X-Filename': encodeURIComponent(curFile.name)},
+      body: curFile
+    });
+    const data = await res.json();
+    render(data, (performance.now() - t0) / 1000);
+  }catch(e){
+    showMsg('请求失败：' + e.message, 'err');
+    $('plate').className = 'plate empty'; $('plate').textContent = '识别失败';
+  }finally{
+    clearInterval(hints);
+    $('spin').classList.remove('on');
+    $('go').disabled = false;
+    pollStatus();
+    loadHistory();
+  }
+};
+
+/* ---------- 渲染 ---------- */
+function render(d, wall){
+  if(d.file) d.file = decodeURIComponent(d.file);
+  if(!d.ok){
+    $('plate').className = 'plate empty'; $('plate').textContent = d.text || '识别失败';
+    showMsg(d.error ? ('出错：' + d.error) : (d.warning || '未识别到车牌'), 'err');
+    return;
+  }
+  if(!d.text){
+    $('plate').className = 'plate empty'; $('plate').textContent = '未检测到车牌';
+    showMsg(d.warning || '未检测到车牌：请换一张车牌更清晰、更居中的照片', 'warn');
+  }else{
+    $('plate').className = 'plate'; $('plate').textContent = d.text;
+    if((d.scores || []).some(s => s < 0.6))
+      showMsg('部分字符置信度偏低，建议人工核对（红色/低分字符）', 'warn');
+  }
+
+  $('chars').innerHTML = '';
+  (d.details || []).forEach(c => {
+    const pct = Math.round((c.score || 0) * 100);
+    const el = document.createElement('div');
+    el.className = 'chip';
+    el.innerHTML =
+      (c.png ? '<img src="data:image/png;base64,' + c.png + '" alt="">' : '') +
+      '<div class="c">' + (c.char || '?') + '</div>' +
+      '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+      '<div class="s">' + pct + '%</div>';
+    $('chars').appendChild(el);
+  });
+
+  $('meta').style.display = 'flex';
+  $('mQ').textContent = d.quality
+      ? (d.quality.extent || 0).toFixed(2) + ' / ' + (d.quality.colorFrac || 0).toFixed(2)
+      : '-';
+  $('mN').textContent = (d.nChars ?? (d.chars || []).length);
+  $('mT').textContent = (d.elapsed ? d.elapsed.toFixed(2) : '-') + ' s';
+  $('mE').textContent = wall.toFixed(2) + ' s';
+
+  if(d.plateImagePng){
+    $('cimg').src = 'data:image/png;base64,' + d.plateImagePng;
+    $('cropBox').style.display = 'block';
+  }
+  const brief = Object.assign({}, d);
+  if(brief.plateImagePng) brief.plateImagePng = '<base64 PNG 已省略>';
+  if(brief.details) brief.details = (brief.details||[]).map(x => ({char:x.char, score:Number((x.score||0).toFixed(3))}));
+  $('json').textContent = JSON.stringify(brief, null, 2);
+  $('jsonBox').style.display = 'block';
+}
+
+/* ---------- 历史 ---------- */
+async function loadHistory(){
+  try{
+    const r = await fetch('/api/history');
+    const {items} = await r.json();
+    const box = $('hist');
+    box.innerHTML = '';
+    if(!items || !items.length) return;
+    const h = document.createElement('div');
+    h.className = 'card';
+    h.innerHTML = '<h2>识别记录</h2>';
+    items.forEach(it => {
+      const el = document.createElement('div');
+      el.className = 'hrow';
+      el.innerHTML =
+        '<span class="f">' + (it.time || '') + '</span>' +
+        '<span class="t">' + (it.text || '未识别') + '</span>' +
+        '<span class="f">' + (it.file || '') + '</span>';
+      h.appendChild(el);
+    });
+    box.appendChild(h);
+  }catch(e){}
+}
+loadHistory();
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 服务版(server)运行时产物 ----
+server/tools/out/
+server/jobs/
+server/uploads/
+server/*.log
+server/portable/cloudflared.exe
+server/portable/cloudflared
+server/portable/*.zip
+
+# ---- MATLAB ----
+*.asv
+*.m~
+slprj/
+codegen/
+
+# ---- Node (浏览器端测试脚本) ----
+node_modules/
+package-lock.json
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 其他 ----
+*.zip
+*.7z
+*.log

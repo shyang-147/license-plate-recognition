@@ -1,0 +1,11 @@
+* text=auto
+*.bat text eol=crlf
+*.m   text eol=lf
+*.py  text eol=lf
+*.js  text eol=lf
+*.mjs text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.jpg binary
+*.png binary
+*.mat binary
