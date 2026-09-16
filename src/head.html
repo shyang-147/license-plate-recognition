@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>车牌识别 · 浏览器版</title>
+<meta name="description" content="上传车牌照片, 直接在浏览器里识别车牌号。无需安装, 无需联网, 图片不上传服务器。">
+<style>
+:root{
+  --bg:#0f172a; --bg2:#111c33; --card:#16233d; --line:#26365a;
+  --fg:#e8eefc; --dim:#93a4c4; --accent:#3b82f6; --accent2:#22d3ee;
+  --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:radial-gradient(1200px 600px at 50% -200px,#16294d 0%,var(--bg) 60%) no-repeat,var(--bg);
+  color:var(--fg); min-height:100vh;
+  font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1000px;margin:0 auto;padding:28px 18px 60px}
+header{text-align:center;margin:8px 0 26px}
+header h1{margin:0 0 8px;font-size:26px;letter-spacing:.5px}
+header h1 span{color:var(--accent2)}
+header p{margin:0;color:var(--dim);font-size:13.5px}
+.tags{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+.tag{font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:3px 10px;background:rgba(255,255,255,.02)}
+.card{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));
+  border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;
+  box-shadow:0 12px 34px rgba(0,0,0,.28)}
+#drop{border:2px dashed var(--line);border-radius:14px;padding:34px 18px;text-align:center;
+  cursor:pointer;transition:.18s;background:rgba(59,130,246,.045)}
+#drop:hover,#drop.over{border-color:var(--accent);background:rgba(59,130,246,.11)}
+#drop.busy{pointer-events:none;opacity:.75}
+#drop .big{font-size:17px;font-weight:600;margin-bottom:6px}
+#drop .sub{color:var(--dim);font-size:12.5px}
+.row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:14px}
+button{font:inherit;cursor:pointer;border-radius:10px;padding:9px 16px;
+  border:1px solid var(--line);background:#1d2c4a;color:var(--fg);transition:.15s}
+button:hover{border-color:var(--accent);background:#243659}
+button.primary{background:linear-gradient(180deg,#3b82f6,#2563eb);border-color:#2563eb}
+button.primary:hover{background:linear-gradient(180deg,#4c8ef7,#2f6ee8)}
+button:disabled{opacity:.5;cursor:not-allowed}
+#result{text-align:center}
+#plateText{font-size:46px;font-weight:800;letter-spacing:6px;margin:6px 0 2px;
+  font-family:ui-monospace,Consolas,"Courier New",monospace;color:#fff;word-break:break-all;min-height:56px}
+#plateText.err{font-size:17px;letter-spacing:0;color:var(--warn);font-family:inherit;font-weight:600}
+#plateText.empty{color:var(--dim);font-size:30px;letter-spacing:2px}
+#meta{color:var(--dim);font-size:12.5px;margin-top:6px}
+#chars{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+.chbox{border:1px solid var(--line);border-radius:10px;padding:8px 6px;background:rgba(0,0,0,.22);min-width:56px}
+.chbox canvas{display:block;margin:0 auto 6px;image-rendering:pixelated;height:40px;width:auto}
+.chbox .lb{font-size:19px;font-weight:700;font-family:ui-monospace,Consolas,monospace;line-height:1}
+.chbox .sc{font-size:10.5px;color:var(--dim);margin-top:3px}
+.chbox.warn .lb{color:var(--warn)}
+.stages{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.stage{border:1px solid var(--line);border-radius:12px;padding:10px;background:rgba(0,0,0,.18)}
+.stage h3{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.4px}
+.stage canvas{display:block;max-width:100%;height:auto;border-radius:6px}
+.stage.full{grid-column:1/-1}
+#spin{display:none;align-items:center;gap:9px;justify-content:center;color:var(--dim);font-size:13px;margin-top:10px}
+#spin.on{display:flex}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--accent2);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
+details{border-top:1px solid var(--line);margin-top:14px;padding-top:12px}
+summary{cursor:pointer;color:var(--dim);font-size:13px;outline:none}
+summary:hover{color:var(--fg)}
+details .body{color:var(--dim);font-size:12.5px;margin-top:10px;line-height:1.85}
+details .body b{color:#cfe0ff;font-weight:600}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12.5px;color:var(--dim);margin-top:8px}
+.kv b{color:#cfe0ff;font-weight:600}
+footer{text-align:center;color:var(--dim);font-size:12px;margin-top:26px;line-height:1.9}
+kbd{background:#1d2c4a;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;
+  padding:1px 6px;font-size:11.5px;font-family:inherit;color:#cfe0ff}
+@media (max-width:640px){
+  .wrap{padding:18px 12px 40px}
+  #plateText{font-size:34px;letter-spacing:3px}
+  .stages{grid-template-columns:1fr}
+  header h1{font-size:21px}
+  .card{padding:14px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>车牌识别 <span>· 浏览器版</span></h1>
+    <p>上传一张车牌照片，直接在浏览器里算出车牌号</p>
+    <div class="tags">
+      <span class="tag">无需安装</span>
+      <span class="tag">无需联网</span>
+      <span class="tag">图片不上传服务器</span>
+      <span class="tag">手机可用</span>
+    </div>
+  </header>
+
+  <div class="card">
+    <div id="drop">
+      <div class="big">点击选择照片，或把照片拖到这里</div>
+      <div class="sub">也可以直接按 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴截图 · 支持 JPG / PNG / WebP</div>
+    </div>
+    <input type="file" id="file" accept="image/*" hidden>
+    <div class="row">
+      <button class="primary" id="pick">选择照片</button>
+      <button id="demo">用示例图片试试</button>
+      <button id="reset">清空</button>
+    </div>
+    <div id="spin"><span class="dot"></span><span id="spinText">识别中…</span></div>
+  </div>
+
+  <div class="card" id="result">
+    <div id="plateText" class="empty">等待照片…</div>
+    <div id="meta"></div>
+    <div id="chars"></div>
+    <details id="detail" style="display:none">
+      <summary>查看识别细节 / 中间结果</summary>
+      <div class="body">
+        <div class="kv" id="kv"></div>
+      </div>
+    </details>
+    <details id="stagesWrap" style="display:none">
+      <summary>查看中间过程图</summary>
+      <div class="body">
+        <div class="stages" style="margin-top:10px">
+          <div class="stage full"><h3>① 原图 + 定位框</h3><canvas id="c1"></canvas></div>
+          <div class="stage"><h3>② 校正后的车牌</h3><canvas id="c2"></canvas></div>
+          <div class="stage"><h3>③ 二值化（字符=黑）</h3><canvas id="c3"></canvas></div>
+          <div class="stage full"><h3>④ 切分出的字符</h3><canvas id="c4"></canvas></div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>这个网站是怎么工作的？</summary>
+      <div class="body">
+        <p style="margin:0 0 8px">整条识别流水线跟 MATLAB 工程一模一样，只是用 JavaScript 重写了一遍，全部在你的浏览器里跑，所以不需要服务器、也不需要联网：</p>
+        <p style="margin:0">
+          <b>① 车牌定位</b> — 按蓝/绿/黄底色做颜色掩膜，配合形态学闭运算连成块，再按长宽比、面积、底色占比、边缘密度、矩形度打分，取分最高的候选；<br>
+          <b>② 真车牌闸门</b> — 矩形度 &lt; 0.50 或框内底色占比 &lt; 0.30 的候选判为假车牌，直接返回"未检测到"；<br>
+          <b>③ 倾斜校正</b> — 用车牌掩膜的上下边界做最小二乘拟合估倾角，旋转校正后把高度归一化到 64 像素；<br>
+          <b>④ 字符分割</b> — 限制对比度自适应直方图均衡（CLAHE）→ 大津法二值化 → 去车牌外框 → 垂直投影取字符段；<br>
+          <b>⑤ 字符识别</b> — 每个字符归一化到 32×16，降采样成 24×12 特征，跟 65 个模板（31 个汉字 + 24 个字母 + 10 个数字）算 <b>0.65×IoU + 0.35×相关系数</b>，取最高的那个。
+        </p>
+        <p style="margin:8px 0 0">
+          字符模板由 MATLAB 版的 <b>templates.mat</b> 直接导出（Arial / SimHei 渲染），所以这里的识别结果跟 MATLAB 版是一致的。
+        </p>
+      </div>
+    </details>
+    <details>
+      <summary>识别不准怎么办？</summary>
+      <div class="body">
+        <p style="margin:0 0 6px">对照片的要求跟 MATLAB 版一样：</p>
+        <p style="margin:0">
+          · 车牌在照片里<b>宽度至少 100 像素</b>，太远太糊都不行；<br>
+          · 尽量<b>正对车牌</b>拍，倾斜别超过 10°；<br>
+          · 别过曝、别夜里拍、别被大灯打反光；<br>
+          · 照片里<b>最好不要有其它蓝底/绿底的矩形物体</b>（比如蓝色广告牌），否则可能定位到别的东西上去。
+        </p>
+        <p style="margin:8px 0 0">
+          如果定位框明显套错了地方，说明第一步找错了区域；如果框是对的但字符切得不对，
+          可以在 MATLAB 版里用 <b>debug_one.m</b> 逐级看是哪一步出的问题。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <footer>
+    纯前端实现 · 所有计算在本机浏览器完成 · 照片不会离开你的设备<br>
+    单文件网页，拷到任何设备双击即可打开（也可直接放到任意网站服务器上）
+  </footer>
+</div>
