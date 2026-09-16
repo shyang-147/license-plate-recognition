@@ -44,6 +44,24 @@
 - GitHub Pages / Cloudflare Pages / Vercel：把文件传到仓库里，开 Pages 即可；
 - 自己的服务器：丢进网站根目录就行。
 
+### 更新线上演示（GitHub Pages）
+
+本仓库已经开了 Pages，公网地址（手机 4G 也能开）：
+
+**https://shyang-147.github.io/license-plate-recognition/**
+
+它对应的是 `gh-pages` 分支，内容就是本目录。改了 `index.html`（记得先在 `src/` 里跑
+`python build_site.py` 重新生成）之后，同步到线上：
+
+```bash
+git subtree push --prefix=site origin gh-pages
+```
+
+> 如果 git 报 `Failed to connect to github.com:443 over proxy 127.0.0.1`，
+> 说明本机 git 配的代理没开，直连即可：
+> `git -c http.proxy= -c https.proxy= subtree push --prefix=site origin gh-pages`
+
+
 ## 识别流程（跟 MATLAB 版一一对应）
 
 | 步骤 | 做法 |
