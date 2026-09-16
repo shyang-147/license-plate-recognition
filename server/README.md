@@ -1,5 +1,7 @@
 # 车牌识别网站（Python + MATLAB 后台版）
 
+> 项目总览（三种形态、算法流程、完整实测表）见[仓库根目录 README](../README.md)。
+
 > **先看这里**：如果你只是想要"上传照片 → 看车牌号"，而且不想装 MATLAB / 不想开服务，
 > 请用 **`site/index.html`** —— 一个 HTML 文件，双击就能用，
 > 拷到手机上也一样跑（识别在浏览器里完成，不依赖这台电脑）。
@@ -14,7 +16,7 @@
 ![界面截图](screenshot.png)
 
 > **只想拷一个文件、不想管目录结构？** 用 `portable/` 里的单文件版：
-> 网页 + MATLAB 识别内核 + worker 全部打包成 **一个 `lpr_server.py`（186 KB）**，
+> 网页 + MATLAB 识别内核 + worker 全部打包成 **一个 `lpr_server.py`（约 253 KB）**，
 > 拷到任何地方双击 `start_lan.bat` 就能跑，还带一个 `start_public.bat` 公网模式
 > （自动开 cloudflared 隧道 + 随机访问口令，手机用 4G 也能打开）。详见 `portable/README.md`。
 
@@ -197,7 +199,7 @@ msedge.exe --headless=new --remote-debugging-port=9222 ^
 | 首次识别等很久 | 正常，是在启动 MATLAB（10~20 秒）；看页面上的"正在启动 MATLAB 识别引擎"提示 |
 | 一直提示「正在启动」不结束 | 看 `jobs/worker.log`；多半是 `LPR_MATLAB` 路径不对，或 MATLAB license 被占用 |
 | 提示未检测到车牌 | 换一张车牌更大、更正、光线更好的照片；写真车牌时用手机横拍整辆车 |
-| 识别结果不对 | 模板匹配的固有精度（字符 87.9%、整牌 55%），见 `../matlab/README.md` 第 8 节 |
+| 识别结果不对 | 模板匹配的固有精度（bench 字符 99.3%、整牌 95.0%），见 `../matlab/README.md` 第 8 节 |
 | 换电脑/发给别人时提示找不到 `server.py` | `.py` 和 `.bat` 必须在同一个文件夹里。最省事的办法是用 `portable/` 的单文件版，只需拷一个文件；微信里传 `.py` 有时会被拦，建议压成 zip 再发 |
 | 想让手机/其他电脑访问 | 双击 `start_lan.bat`（等价于 `set LPR_HOST=0.0.0.0`），再用它打印的局域网地址打开；记得放行防火墙「专用网络」 |
 | 内存吃紧 | 不识别时 `POST /api/stop` 释放 MATLAB 进程，下次识别会自动重启 |
@@ -230,6 +232,6 @@ msedge.exe --headless=new --remote-debugging-port=9222 ^
 - 批量上传 / 文件夹批量识别，结果导出 CSV
 - 识别结果写数据库，做停车场进出记录
 - 视频流：前端抽帧上传，或后端直接读 `VideoReader` + 多帧投票
-- 换成 CNN 字符识别（`matlab/train_char_cnn.m`），把整牌准确率从 55% 拉到 95%+
+- 换成 CNN 字符识别（`matlab/train_char_cnn.m`），把难集与实拍上的整牌准确率往上提
 
 算法本体（定位/校正/分割/识别、调参、限制）见上级目录 `../matlab/README.md`。
