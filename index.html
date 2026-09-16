@@ -902,28 +902,46 @@ function illumNormalize(gray, w, h) {
   return out;
 }
 
-/* 清掉某一列中过长的连续笔画(车牌左右边框) */
-function clearLongRunsCol(out, w, h, x, thr) {
-  var y = 0;
-  while (y < h) {
-    if (out[y * w + x] > 0) {
-      var s0 = y;
-      while (y < h && out[y * w + x] > 0) { y++; }
-      if (y - s0 > thr) { for (var k = s0; k < y; k++) { out[k * w + x] = 0; } }
-    } else { y++; }
+/* 连通域周长估计: 统计暴露在外的像素边(与 MATLAB regionprops 的 Perimeter 同量级) */
+function compPerimeter(labels, id, w, h) {
+  var p = 0, x, y, i;
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      i = y * w + x;
+      if (labels[i] !== id) { continue; }
+      if (x === 0 || labels[i - 1] !== id) { p++; }
+      if (x === w - 1 || labels[i + 1] !== id) { p++; }
+      if (y === 0 || labels[i - w] !== id) { p++; }
+      if (y === h - 1 || labels[i + w] !== id) { p++; }
+    }
   }
+  return p;
 }
 
-/* 清掉某一行中过长的连续笔画(车牌上下边框) */
-function clearLongRunsRow(out, w, h, y, thr) {
-  var x = 0, ro = y * w;
-  while (x < w) {
-    if (out[ro + x] > 0) {
-      var s0 = x;
-      while (x < w && out[ro + x] > 0) { x++; }
-      if (x - s0 > thr) { for (var k = s0; k < x; k++) { out[ro + k] = 0; } }
-    } else { x++; }
+/* 整块删掉"贴着车牌外沿、又长又细"的连通域(车牌外框 / 白边残留)
+   对应 segmentChars.m 的 removeEdgeSlivers, 三项同时成立才删:
+   贴边(外接框触到外圈 ring+1 以内) + 最长边 >= minLen + 满足任一"纤细"判据:
+     面积/最长边 <= maxThick  : 细长残段, 如被 JPEG 打断的下边框
+     面积/周长   <= maxLineT  : 线条状, 如闭合的矩形外框白线
+   闭合外框的面积/最长边约为真实线宽的 2 倍(长边、短边的面积都算进分子,
+   却只除以一条长边), 实测 6.8 > 4.5, 会被第一条漏掉, 所以要补第二条。
+   bw 已经清掉最外圈 ring 像素, 所以直接用 ring 判断"是否贴边"。 */
+function removeEdgeSlivers(bw, w, h, ring, minLen, maxThick, maxLineT) {
+  var res = label8(bw, w, h);
+  var labels = res.labels, stats = res.stats;
+  var drop = new Uint8Array(stats.length + 1), i;
+  for (i = 0; i < stats.length; i++) {
+    var st = stats[i];
+    var x0 = st.minX + 1, x1 = st.maxX + 1;      /* 转成 1 基, 与 MATLAB 对齐 */
+    var y0 = st.minY + 1, y1 = st.maxY + 1;
+    if (!(x0 <= ring + 1 || y0 <= ring + 1 || x1 >= w - ring || y1 >= h - ring)) { continue; }
+    var len = Math.max(st.maxX - st.minX + 1, st.maxY - st.minY + 1);
+    if (len < minLen) { continue; }
+    var perim = compPerimeter(labels, i + 1, w, h);
+    if (st.area / len <= maxThick || st.area / Math.max(perim, 1) <= maxLineT) { drop[i + 1] = 1; }
   }
+  for (i = 0; i < w * h; i++) { if (drop[labels[i]]) { bw[i] = 0; } }
+  return bw;
 }
 
 /* 去掉车牌外框(对应 segmentChars.m 的 removeFrame) */
@@ -934,27 +952,18 @@ function removeFrameLocal(bw, w, h) {
   for (y = 0; y < ring; y++) { for (x = 0; x < w; x++) { out[y * w + x] = 0; out[(h - 1 - y) * w + x] = 0; } }
   for (x = 0; x < ring; x++) { for (y = 0; y < h; y++) { out[y * w + x] = 0; out[y * w + (w - 1 - x)] = 0; } }
 
-  /* 车牌外框一定紧贴裁剪边界, 而字符都在中部, 所以只在外圈窄带里清"超长直线":
-       竖直方向: 外 6% 宽度的列中, 连续笔画超过 0.60*H 的判为左右边框;
-       水平方向: 外 12% 高度的行中, 连续笔画超过 0.35*W 的判为上下边框。
-     数字 1 的竖线约 0.70*H, 但它落在车牌中部, 不进外圈窄带, 因此不会被误删;
-     字符最长的横画(如"三"的横)也只有约 0.13*W, 0.35*W 留了足够余量。
+  /* 车牌外框一定紧贴裁剪边界, 而字符都在中部, 所以只删"贴着外沿、又长又细"的
+     连通域(判据见 removeEdgeSlivers): 贴边 + 最长边 >= 0.30*H + 平均厚度 <= 4 px。
+     数字 1 的竖线约 0.70*H, 但它在车牌中部, 不贴外沿, 不会被误删;
+     字符笔画有 4~6 px 厚, 即使被裁到边也会因为"太粗"而放行。
 
-     原来这两个阈值是 0.70*H / 0.70*W, 在合成图上够用, 到真实照片上就漏了:
-     实拍牌照的边框被 JPEG 与模糊打断成几段(real01 的下边框断成 51 px 和
-     142 px 两段, 都短于 0.60*W 的核长), 整条边框残留下来, 把每个字符的墨迹
-     包围盒从 42 行撑到 58 行, 字符被纵向压扁, 匹配得分从 0.7 掉到 0.3。 */
-  var bandX = Math.max(2, Math.round(0.06 * w));
-  var bandY = Math.max(2, Math.round(0.12 * h));
-  var vThr = 0.60 * h, hThr = 0.35 * w;
-  for (x = 0; x < bandX && x < w; x++) {
-    clearLongRunsCol(out, w, h, x, vThr);
-    clearLongRunsCol(out, w, h, w - 1 - x, vThr);
-  }
-  for (y = 0; y < bandY && y < h; y++) {
-    clearLongRunsRow(out, w, h, y, hThr);
-    clearLongRunsRow(out, w, h, h - 1 - y, hThr);
-  }
+     这里原来按"外圈窄带内清超长笔画"判断(垂直 0.60*H / 水平 0.35*W), 有两个毛病:
+     一是实拍牌照的边框被 JPEG 与模糊打断成几段, 每段都短于阈值, 整条边框留下来
+     (real01 的下边框断成 51 px 和 142 px 两段), 把每个字符的墨迹包围盒从 42 行
+     撑到 58 行, 字符被纵向压扁, 匹配得分从 0.7 掉到 0.3;
+     二是斜边框每行只占 1~2 px, 长度判据检不出来, 反而会因为某行笔画长就整行抹掉
+     —— bench01 左下角留下的 1 px 宽、23 px 高的残端会被当成独立字符, 7 位牌切出 8 段。 */
+  removeEdgeSlivers(out, w, h, ring, 0.30 * h, 4.5, 1.5);
 
   var sc = makeScratch();
   var hLine = imopen(out, w, h, Math.max(5, Math.round(0.60 * w)), 1, sc);
@@ -1290,7 +1299,16 @@ function setTemplates(json) {
 function bestMatch(f, set, opts) {
   var n = f.length, i, k;
   var fb = new Uint8Array(n), nf = 0, meanF = 0;
-  for (i = 0; i < n; i++) { if (f[i] > 0.5) { fb[i] = 1; nf++; } meanF += f[i]; }
+  /* 二值化阈值只用来切"实测特征", 模板特征来自 0/1 图, 仍然用 0.5。
+     这个值是各自流水线的调参常数, 两条流水线的最优值不同(都实测过):
+       网页版(本文件, illumNormalize+Otsu):  0.35 -> hard 70.8%/93.7%, bench 90.0%/98.6%
+                                              0.50 -> hard 62.5%/93.1%, bench 85.0%/97.9%
+       MATLAB(adapthisteq+Otsu):             0.50 -> hard 66.7%/83.3%, bench 95.0%/99.3%
+                                              0.35 -> hard 50.0%/80.5%, bench 95.0%/99.3%
+     机制: 降阈值会把笔画喂胖(MATLAB 侧"3"变"8"、"0"变"9"), 但本文件的
+     降采样/归一化更"细瘦", 需要松一点才能保住细笔画。改这个值前请重跑两边的
+     run_js.mjs 与 run_all, 不要只调一边。 */
+  for (i = 0; i < n; i++) { if (f[i] > 0.35) { fb[i] = 1; nf++; } meanF += f[i]; }
   meanF /= n;
   var fa = new Float32Array(n), acc = 0;
   for (i = 0; i < n; i++) { var d = f[i] - meanF; fa[i] = d; acc += d * d; }
@@ -1325,12 +1343,16 @@ function recognizeChars(charImages, inkBoxes) {
     var f = charFeature(charImages[k]);
     var set = positionSet(S, fmt, k);   /* 只在该位允许的字符里找最优 */
     var r = bestMatch(f, set);
-    /* 汉字之后的位置上, 如果这一段墨迹特别细长, 基本只可能是数字 1。
-       归一化的 'fill' 模式会把细长笔画横向拉伸得很宽, 长得像 4, 容易误判,
-       所以这里给一个很小的加分把它纠回来(只影响极窄的段)。 */
+    /* 汉字之后的位置上, 如果这一段墨迹特别细长, 基本只可能是数字 1(车牌上唯一
+       又窄又高的字符, 字母 I 已被排除)。归一化的 'fill' 模式会把细长笔画横向
+       拉伸成实心块(实测用户照片里 AR=0.132 的 1 被拉宽后更像 8/4/0: 对模板 "1"
+       只有 0.31, 而 8 拿到 0.51), 所以按宽度分两档:
+         AR < 0.22 : 直接判定为 1 —— 逐图实测所有数据集里第 2 位起、AR < 0.22 的段 100% 是 1;
+         0.22~0.30 : 只给一个很小的加分, 不强制 —— 新能源牌被纵向压缩时
+                     D/Q/5/9/F/G 的 AR 也会掉到 0.25 左右, 强制会误伤它们。 */
     if (k >= 2 && inkBoxes && inkBoxes[k] && inkBoxes[k].ar > 0 && inkBoxes[k].ar < 0.30) {
       var alt = bestMatch(f, restrictSet(set, '1'));
-      if (alt.score + 0.06 > r.score) { r = alt; }
+      if (inkBoxes[k].ar < 0.22 || alt.score + 0.06 > r.score) { r = alt; }
     }
     var lb = r.label;
     if (k === 0 && r.score < 0.45) { lb = '*'; }
@@ -1728,7 +1750,8 @@ var API = {
 if (typeof module !== 'undefined' && module.exports) { module.exports = API; }
 global.LPREngine = API;
 
-})(typeof window !== 'undefined' ? window : globalThis);</script>
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 
 <!-- ============ 页面逻辑 ============ -->
 <script>
