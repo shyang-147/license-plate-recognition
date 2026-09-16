@@ -80,23 +80,64 @@ end
 % ======================== 局部函数 ========================
 
 function bw = removeFrame(bw)
-%REMOVEFRAME 抹掉车牌外框, 分两步:
+%REMOVEFRAME 抹掉车牌外框, 分三步:
 %   1) 清掉最外圈 2~3 像素(车牌外框通常紧贴车牌边缘)
-%   2) 用"接近车牌整宽/整高"的长线条开运算提取残留外框再删除
-%   注意: 线条长度必须明显大于字符最长笔画(如数字 1 的竖线约占牌高 70%),
-%         用 W/3、H/3 会把数字 1 当成外框删掉。
+%   2) 外圈窄带内清"超长笔画": 外 6% 宽度的列里连续笔画超过 0.60*H 的判为
+%      左右边框, 外 12% 高度的行里连续笔画超过 0.35*W 的判为上下边框
+%   3) 全图再做一次长线开运算(水平 0.60*W / 垂直 0.85*H), 清完整的外框线
+%
+%   第 2 步的水平阈值(0.35*W)必须比第 3 步(0.60*W)松, 否则实拍图会漏:
+%   真实牌照的边框被 JPEG 与模糊打断成几段 —— 实测 real01 的下边框断成 51 px
+%   和 142 px 两段, 都短于 0.60*W 的核长, 只靠第 3 步的"连续长线"判据整条边框
+%   都会留下来, 把每个字符的墨迹包围盒从 42 行撑到 58 行, 归一化时字符被纵向
+%   压扁, 模板匹配得分从 0.7 掉到 0.3。
+%   判据用"最长的连续笔画"而不是"整行墨迹总量", 是因为后者会被相邻字符底部
+%   对齐的行误触发(合成集里这类行的墨迹率最高到 0.57*W, 与真实边框线分不开)。
+%   数字 1 的竖线约占 0.70*H, 但它落在车牌中部, 不进外圈窄带, 不会被误删。
 [H, W] = size(bw);
 ring = max(2, round(0.03 * H));
 bw(1:ring, :) = false;      bw(end - ring + 1:end, :) = false;
 bw(:, 1:ring) = false;      bw(:, end - ring + 1:end) = false;
 
-hLine = imopen(bw, strel('line', max(5, round(0.60 * W)), 0));   % 水平长线
-vLine = imopen(bw, strel('line', max(5, round(0.85 * H)), 90));  % 垂直长线
+bw = clearBandRuns(bw);
+
+hLine = imopen(bw, strel('line', max(5, round(0.60 * W)), 0));   % 完整水平外框
+vLine = imopen(bw, strel('line', max(5, round(0.85 * H)), 90));  % 完整垂直外框
 frame = hLine | vLine;
 if any(frame(:))
     frame = imdilate(frame, strel('square', 3));
     bw = bw & ~frame;
 end
+end
+
+function bw = clearBandRuns(bw)
+%CLEARBANDRUNS 只在外圈窄带里清超长笔画(车牌边框必然贴边, 字符都在中部)
+[H, W] = size(bw);
+bandX = max(2, round(0.06 * W));
+bandY = max(2, round(0.12 * H));
+cols = unique([1:min(bandX, W), max(1, W - bandX + 1):W]);
+rows = unique([1:min(bandY, H), max(1, H - bandY + 1):H]);
+for x = cols
+    bw(:, x) = clearLongRuns(bw(:, x), 0.60 * H);
+end
+for y = rows
+    bw(y, :) = clearLongRuns(bw(y, :), 0.35 * W);
+end
+end
+
+function v = clearLongRuns(v, thr)
+%CLEARLONGRUNS 把长度超过 thr 的连续 true 段整段置 false(保持输入的行/列方向)
+wasCol = size(v, 2) == 1;
+w = v(:)';
+d = diff([false, w, false]);
+s = find(d == 1);
+e = find(d == -1) - 1;
+for i = 1:numel(s)
+    if e(i) - s(i) + 1 > thr
+        w(s(i):e(i)) = false;
+    end
+end
+if wasCol, v = w(:); else, v = w; end
 end
 
 function runs = chooseCount(runs, proj)
@@ -108,8 +149,25 @@ function runs = chooseCount(runs, proj)
 %   (裁紧后两者的 span/W 都在 0.87 左右, 固定比例必然把 8 位牌当成 7 位)。
 %   试过把"各段宽度是否均匀"也加进判据: 基准集与难集的字符数正确率都变差,
 %   说明二值化后笔画粘连/断裂导致的宽度抖动, 比"字被劈成两半"更常见。
-best = inf; bestRuns = runs;
-for n = 6:8
+%   候选位数分两轮: 先只试 7 / 8(中国大陆单排车牌只有这两种制式: 普通牌
+%   7 位、新能源牌 8 位), 都不成立时才退回 6~8 全范围。实拍图里笔画粘连/
+%   断裂会让原始段数偏少, 而"中心间距最均匀"这个判据在段数越少时越容易偶然
+%   取到很小的变异系数 —— 实测 real01 就被选成了 6 段。先用制式先验收窄范围
+%   能挡住这类退化; 收窄后若一个都拟合不上(adjustToCount 会主动放弃而不是
+%   硬切), 再退回全范围, 不会漏掉特殊号牌。
+bestRuns = tryCounts(runs, proj, 7, 8);
+if isempty(bestRuns)
+    bestRuns = tryCounts(runs, proj, 6, 8);
+end
+if isempty(bestRuns)
+    bestRuns = runs;
+end
+runs = bestRuns;
+end
+
+function bestRuns = tryCounts(runs, proj, lo, hi)
+bestRuns = []; best = inf;
+for n = lo:hi
     r = adjustToCount(runs, proj, n);
     if size(r, 1) ~= n, continue; end
     d = diff(mean(r, 2));
@@ -119,7 +177,6 @@ for n = 6:8
         best = cv;  bestRuns = r;
     end
 end
-runs = bestRuns;
 end
 
 function runs = logicalRuns(act)

@@ -934,13 +934,19 @@ function removeFrameLocal(bw, w, h) {
   for (y = 0; y < ring; y++) { for (x = 0; x < w; x++) { out[y * w + x] = 0; out[(h - 1 - y) * w + x] = 0; } }
   for (x = 0; x < ring; x++) { for (y = 0; y < h; y++) { out[y * w + x] = 0; out[y * w + (w - 1 - x)] = 0; } }
 
-  /* 车牌外框一定紧贴裁剪边界, 而字符都在中部。所以只在外圈窄带里清"超长直线":
-       竖直方向: 外 6% 宽度的列中, 连续笔画超过 0.70*H 的判为左右边框;
-       水平方向: 外 8% 高度的行中, 连续笔画超过 0.70*W 的判为上下边框。
-     数字 1 的竖线位于车牌中部, 且长度通常不到 0.7*H, 因此不会被误删。 */
+  /* 车牌外框一定紧贴裁剪边界, 而字符都在中部, 所以只在外圈窄带里清"超长直线":
+       竖直方向: 外 6% 宽度的列中, 连续笔画超过 0.60*H 的判为左右边框;
+       水平方向: 外 12% 高度的行中, 连续笔画超过 0.35*W 的判为上下边框。
+     数字 1 的竖线约 0.70*H, 但它落在车牌中部, 不进外圈窄带, 因此不会被误删;
+     字符最长的横画(如"三"的横)也只有约 0.13*W, 0.35*W 留了足够余量。
+
+     原来这两个阈值是 0.70*H / 0.70*W, 在合成图上够用, 到真实照片上就漏了:
+     实拍牌照的边框被 JPEG 与模糊打断成几段(real01 的下边框断成 51 px 和
+     142 px 两段, 都短于 0.60*W 的核长), 整条边框残留下来, 把每个字符的墨迹
+     包围盒从 42 行撑到 58 行, 字符被纵向压扁, 匹配得分从 0.7 掉到 0.3。 */
   var bandX = Math.max(2, Math.round(0.06 * w));
-  var bandY = Math.max(2, Math.round(0.08 * h));
-  var vThr = 0.70 * h, hThr = 0.70 * w;
+  var bandY = Math.max(2, Math.round(0.12 * h));
+  var vThr = 0.60 * h, hThr = 0.35 * w;
   for (x = 0; x < bandX && x < w; x++) {
     clearLongRunsCol(out, w, h, x, vThr);
     clearLongRunsCol(out, w, h, w - 1 - x, vThr);
@@ -1089,8 +1095,19 @@ function adjustToCount(runs, proj, n) {
    或一个字被切成两段(间距约 0.5 倍)都会让间距忽大忽小, 所以间距的变异系数
    (标准差/均值)最小的那个候选就是最可能的真实字数。 */
 function chooseCount(runs, proj) {
-  var best = Infinity, bestRuns = runs, n, i, r, d, m, v;
-  for (n = 6; n <= 8; n++) {
+  /* 候选位数分两轮: 先只试 7 / 8(中国大陆单排车牌只有这两种制式: 普通牌
+     7 位、新能源牌 8 位), 都不成立时才退回 6~8 全范围。
+     实拍图里笔画粘连/断裂会让原始段数偏少, 而"中心间距最均匀"这个判据在
+     段数越少时越容易偶然取到很小的变异系数 —— real01 就被选成了 6 段。
+     先用制式先验收窄范围能挡住这类退化; 收窄后若一个都拟合不上
+     (adjustToCount 会主动放弃而不是硬切), 再退回全范围, 不会漏掉特殊号牌。 */
+  return tryCounts(runs, proj, 7, 8) || tryCounts(runs, proj, 6, 8) || runs;
+}
+
+/* TRYCOUNTS 在 lo~hi 里挑"相邻字符中心间距变异系数最小"的那个字数 */
+function tryCounts(runs, proj, lo, hi) {
+  var best = Infinity, bestRuns = null, n, i, r, d, m, v;
+  for (n = lo; n <= hi; n++) {
     var copy = [];
     for (i = 0; i < runs.length; i++) { copy.push(runs[i].slice()); }
     r = adjustToCount(copy, proj, n);
