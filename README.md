@@ -73,6 +73,7 @@ bench_eval                          % 跑 20 张基准集，输出逐张明细�
 | 真实照片整牌正确率（3 张） | 0/3 | 0/3 |
 | CCPD 整牌 / 字符 / 定位 IoU≥0.5（320 张） | 0/320 · 6.4% · 35.3% | 未接入 |
 | CCPD 误检（40 张真实无车牌照片） | 15/40 | 未接入 |
+| 　└ 换 CNN 引擎（`Engine='cnn'`，可选） | 整牌 **0.075** · 字符 **14.5%** · 位数判对 **40.6%** | 未接入 |
 | 平均单张耗时 | 约 150 ms | 约 150~350 ms |
 
 分辨率退化曲线（合成退化集 60 张，按档归因）：
@@ -99,7 +100,12 @@ license-plate-recognition/
 │  ├─ charFeature.m         降采样成 24×12 特征
 │  ├─ recognizeChars.m      模板匹配识别（按位限定候选集）
 │  ├─ plateFormat.m         车牌制式：7 位普通 / 8 位新能源，逐位允许的字符集
-│  ├─ recognizeCharsCNN.m   CNN 识别（可选，配合 train_char_cnn.m 训练）
+│  ├─ slotEdges.m           固定槽位边界：7 位 / 8 位车牌各槽位的归一化左右边界
+│  ├─ slotChars.m           按固定槽位切字符（绕开二值化 + 投影分割），统一极性 + 逐格拉伸
+│  ├─ recognizeCharsCNN.m   CNN 字符分类（可选，吃 slotChars 的灰度格）
+│  ├─ recognizePlateCNN.m   CNN 整牌识别（可选，7 位 / 8 位各认一遍取高者）
+│  ├─ train_char_cnn.m      训练字符分类 CNN（可选，需 Deep Learning Toolbox）
+│  ├─ charNet.mat           训练好的模型（可重建产物，不进版本库）
 │  ├─ templates.mat         字符模板库（31 汉字 + 24 字母 + 10 数字 + 5 特殊字）
 │  ├─ buildTemplates.m      重新生成模板库
 │  ├─ verify_lpr.m          一键自检（30 项）
@@ -120,7 +126,8 @@ license-plate-recognition/
 │  ├─ tools/                打包脚本 + API / 浏览器测试脚本
 │  └─ portable/             单文件打包版（支持公网隧道 + 访问口令）
 ├─ tools/                   测试图生成脚本（make_demo / make_bench / make_hard /
-│                           make_degrade / make_degrade_real / fetch_ccpd_sample）+ 模板导出
+│                           make_degrade / make_degrade_real / fetch_ccpd_sample /
+│                           make_char_data）+ 模板导出
 ├─ docs/                    流水线配图 + 改进记录
 └─ LICENSE                  MIT
 ```
@@ -149,8 +156,13 @@ license-plate-recognition/
 
 - 只认中国大陆车牌。蓝 / 绿 / 黄底色走颜色掩膜，白底警用车牌走「边缘掩膜 + 白色掩膜」的兜底通道，
   军用和使领馆牌没有实测过。白底通道的主要风险是白色车身、白墙和白底广告牌。
-- 字符识别是模板匹配，形状相近的字符（`1/4`、`9/X`、`3/V`）容易混。要更准可以用
-  `train_char_cnn.m` 训练 CNN，再用 `recognizeCharsCNN.m` 替换。
+- 字符识别**默认**是模板匹配，形状相近的字符（`1/4`、`9/X`、`3/V`）容易混。
+  工程里有可选的 CNN 通路（`lpr_main(..., 'Engine', 'cnn')`，配套 `tools/make_char_data.m`
+  + `matlab/train_char_cnn.m`），并且已经量过：CCPD 真实照片上字符率 6.4% → **14.5%**、
+  位数判对 36.9% → 40.6%，而且更快（省掉二值化 + 投影整条链）；但自产合成集上
+  99.3% → 33.6%。根因是**域不匹配**（同一个模型在自己合成样本上 93.5%、
+  换到 bench 切出来的格子上只剩 43.8%），不是分类器容量，所以**默认仍是模板匹配**。
+  细节见 [`docs/改进记录.md`](docs/改进记录.md) 第十轮。
 - **斜拍是弱项**：透视校正只在车牌被拍成明显梯形时才启用，否则退回旋转校正，
   难集里 6 张斜拍图有 2 张整牌全对。
 - **真实照片要分两类看**：近景实拍（车牌占满画面）修好外框白线后可以整牌全对；

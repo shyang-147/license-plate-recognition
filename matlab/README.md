@@ -50,7 +50,10 @@
 三张没有一张是定位错位，失败都在分割和识别上。字符数不写死 7 位，而是在 6/7/8 之间自校准
 （新能源 8 位牌才不会丢字），代价是个别图会在 7/8 之间摇摆；bench 上这一项已经是 20/20。
 分辨率、形近字符和真实成像域的详细分析见[仓库根目录 README](../README.md) 的「实测结果」
-和 [`docs/改进记录.md`](../docs/改进记录.md)。要上生产建议走 CNN 方案（见第 8 节）。
+和 [`docs/改进记录.md`](../docs/改进记录.md)。要上生产建议走 CNN 方案（见第 8 节）—— **第十轮已经把它做出来了并量过**
+（`lpr_main(..., 'Engine', 'cnn')`）：CCPD 真实照片上字符率 **0.064 → 0.145**、位数判对 0.369 → 0.406，
+而且更快（0.24 s → 0.14 s）；但自产合成集上 **0.993 → 0.336**，根因是**域不匹配**而不是分类器容量。
+所以**默认引擎仍然是模板匹配**，CNN 是可选通路。
 
 ---
 
@@ -58,10 +61,10 @@
 
 | 文件 | 作用 |
 |---|---|
-| `lpr_main.m` | **主入口**。串联完整流程，返回识别结果结构体并可视化 |
+| `lpr_main.m` | **主入口**。串联完整流程，返回识别结果结构体并可视化。`'Engine'` 参数选识别通路：`'template'`（默认，二值化+投影+模板匹配）/ `'cnn'`（固定槽位 + CNN，见下）；`'PlateDigits'` 传已知位数（7/8，例如已判出是新能源绿牌就传 8），留空则取 max(四角实测投影比例, 440/140) |
 | `locatePlate.m` | 车牌定位：颜色掩膜（蓝/绿/黄）+ 边缘掩膜 + 多维特征打分选优；候选要过"矩形度 + 底色占比 + 边缘密度"三闸门；两路都没找到真车牌时再走一路**白底车牌**兜底（警用，`whitePlateRegion`，另加"框里有墨迹 + 长宽比 ≤ 3.8"两道判据） |
 | `cropPlate.m` | 按定位框裁剪车牌（同步裁剪掩膜） |
-| `correctPlate.m` | 几何校正：取掩膜四角，是梯形就用单应变换拉正（透视校正），否则按倾角旋转；高度归一化到 64 px |
+| `correctPlate.m` | 几何校正：取掩膜四角，是梯形就用单应变换拉正（透视校正），否则按倾角旋转；高度归一化到 64 px。**透视校正的目标宽度 = max(四角实测投影比例, 440/140) × 64**（只补透视压缩、不制造压缩 —— 检测框比国标还宽时不动手），已知位数时传第 4 入参走 440/140 或 480/140 |
 | `segmentChars.m` | 字符分割：Otsu → 去边框 → 垂直投影 → 字符数自校准（6~8）拆分/合并 → 归一化，并输出每段墨迹宽高比 |
 | `normalizeChar.m` | 单字符裁边 + 缩放 + 居中到 32×16 画布 |
 | `charFeature.m` | 把字符图降采样成定长特征向量（24×12） |
@@ -69,8 +72,12 @@
 | `plateFormat.m` | 车牌制式表：7 位普通（末位可为 `警`）/ 8 位新能源，逐位允许出现的字符（字母表去掉 I、O） |
 | `buildTemplates.m` | 用系统字体自动生成字符模板库 `templates.mat`（已随工程提供；除 31 汉字/24 字母/10 数字外还含 5 个特殊字 `警挂学领使`） |
 | `templates.mat` | 字符模板库（`buildTemplates.m` 生成，约 48 KB）。**它是模板的唯一来源**，网页版 `../site/src/templates.json` 由 `../tools/export_templates.m` 从这里导出 |
-| `recognizeCharsCNN.m` | **CNN 识别**（工程推荐），配合 `train_char_cnn.m` 使用 |
-| `train_char_cnn.m` | 训练字符分类 CNN（可选，需 Deep Learning Toolbox） |
+| `slotEdges.m` | **固定槽位边界**：7 位 / 8 位车牌各槽位的归一化左右边界（由 CCPD 统计得到，见 `测试脚本/probe_slot_layout.m`） |
+| `slotChars.m` | **按固定槽位切字符**：绕开「二值化 + 垂直投影」，并统一极性（墨迹亮）、逐格对比度拉伸，输出 32×16 灰度格 |
+| `recognizePlateCNN.m` | **整牌 CNN 识别**：7 位和 8 位各认一遍，取平均对数概率高的那个（固定槽位没有「数出几个字符」这个信息） |
+| `recognizeCharsCNN.m` | **CNN 字符分类**：吃 `slotChars` 的灰度格（不是二值图），按 `plateFormat` 逐位限定候选集，一次前向算完整块牌。需 `charNet.mat` |
+| `train_char_cnn.m` | 训练字符分类 CNN（可选，需 Deep Learning Toolbox）。样本目录由 `../tools/make_char_data.m` 生成，14 轮约 7 分钟（纯 CPU） |
+| `charNet.mat` | 训练好的字符分类模型（`train_char_cnn.m` 生成，约 0.8 MB）。**可重建产物，不进版本库** |
 | `demo_run.m` | 批量处理 `images/` 下所有照片 |
 | `verify_lpr.m` | **一键自检**：环境/文件/模块单测/演示图/基准集/可视化/异常处理, 共 30 项 |
 | `debug_one.m` | 单张图逐级可视化, 用来判断问题出在哪一步 |
@@ -89,7 +96,7 @@
 - MATLAB R2020a 或更高（实测 R2024b）
 - **Image Processing Toolbox** —— 必需
 - Computer Vision Toolbox —— 可选（`insertText` 渲染模板；缺失时自动回退到 figure 渲染）
-- Deep Learning Toolbox —— 可选（仅 CNN 方案需要）
+- Deep Learning Toolbox —— 可选（仅 `Engine='cnn'` 与 `train_char_cnn.m` 需要）。**没有 GPU 也能用**：32×16 的小网在 16 核 CPU 上 14 轮约 7 分钟
 
 > 编码提示：`.m` 文件为 UTF-8。R2021b 之前的 MATLAB 在中文 Windows 上默认按 GBK 读取，
 > 若 `buildTemplates.m` 里的汉字乱码，用编辑器另存为本机编码即可。
@@ -269,7 +276,7 @@ debug_one('images/你的图.jpg', 'SavePng', true);    % 同时存成 PNG 便于
 | 斜拍车牌被拉歪 | `correctPlate.m` 的 `hasPerspective` 闸门（阈值 8% / 10° / 高 32 px） |
 | 新能源 8 位牌丢字 | `segmentChars.m` 的 `chooseCount`；确认 `plateFormat` 认到了 8 位 |
 | 边框被当成字符 | `removeFrame` 里的 `ring`、外圈窄带的 `0.35*W`（横）/`0.60*H`（竖）、全图开运算的 `0.60*W`/`0.85*H` |
-| 相似字符混淆（1/4、9/X、3/V） | 用 CNN 方案替代模板匹配 |
+| 相似字符混淆（1/4、9/X、3/V） | 换 CNN 通路：`lpr_main(..., 'Engine', 'cnn')`（需先 `train_char_cnn.m` 产出 `charNet.mat`）。注意它在真实照片上更好、在自产合成集上更差，见第 8 节 |
 | 白底车牌通道误检（真实照片） | `locatePlate.m` 的 `minWhiteFr`（0.35）/ `maxAspectW`（3.8）；**优先别调这两个** —— 第九轮给白底分支补的 `hasCharStructure`（`valid` 里的 `structOK`）才是真正有效的那个判据 |
 
 ---
@@ -292,10 +299,37 @@ debug_one('images/你的图.jpg', 'SavePng', true);    % 同时存成 PNG 便于
    差的这 90 个点不是分辨率而是成像域。第九轮试过逐字符局部阈值、`imbinarize('adaptive')`、
    Sauvola，定位命中后的字符率反而从 15.3% 掉到 4.3~8.0%（「字符数切对」从 55.8% 升到 57.5%）：
    局部二值化让分割更好切，代价是把笔画弄糊、模板匹配直接崩。瓶颈在识别，不在二值化，
-   下一步不该继续调这两处参数，该认真考虑下面第 2 条的 CNN。
-2. **推荐 CNN 方案**（`train_char_cnn.m` + `recognizeCharsCNN.m`）：
-   用 `locatePlate` + `segmentChars` 从大量车牌图自动切字符，人工清洗后每类 300 张以上，
-   32×16 输入的小 CNN 即可把字符准确率做到 98%+。
+   下一步不该继续调这两处参数 —— 第十轮已经把下面第 2 条的 CNN 做出来了，结果见第 2 条的状态更新。
+2. **CNN 方案 —— 第十轮已做出（`Engine='cnn'`），但默认不启用**。
+   实现是 `slotChars.m`（固定槽位切字，绕开分割）+ `recognizePlateCNN.m` / `recognizeCharsCNN.m`；
+   样本由 `../tools/make_char_data.m` 生成（真实域 = CCPD 真值四角裁片，合成域 = 系统字体排版 + 退化增广），
+   训练脚本 `train_char_cnn.m`。
+
+   **实测（360 张 CCPD + 6 套自产集，详见根目录 README「第十轮补充改进」）**：
+
+   | | CCPD 真实照片 | bench（自产合成） |
+   |---|---|---|
+   | 模板匹配 字符率 | 0.064 | 0.993 |
+   | CNN 字符率 | **0.145** | **0.336** |
+
+   真实照片上 CNN 明显更好且更快（省掉 CLAHE + Otsu + 投影整条链），
+   但自产合成集上明显更差 —— 同一个模型在**自己**的合成样本上 93.5%、
+   换到 bench 切出来的格子上只剩 43.8%，**差距在域，不在分类器**。
+   所以默认引擎保持 `template`，CNN 作为可选通路。
+
+   **要往下走得先解决域差距**：把「bench 切出来的格子」和「训练样本」逐格并排比对，
+   定位差距到底出在拉正几何、逐格对比度拉伸、还是退化模型上。
+   **这一条第十一轮已经跑完了**：主因是**几何（槽位切偏）** —— 用真值列区间重切后 top1 从
+   31.4% 直接到 **96.4%**；对比度只有 +0.112、锐化 +0.048。也就是说**瓶颈在"格子没对齐"，
+   不在网络容量**：先把格子对齐，CNN 才有意义。诊断脚本 `测试脚本/probe_domain_gap.m`，
+   原始数字 `结果记录/第十一轮_域差距诊断.txt`，完整报告 `评审与改进/第十一轮_技术报告.md`。
+
+   **两个必须知道的坑**（`train_char_cnn.m` 与 `make_char_data.m` 里都有注释）：
+   ① `augmentedImageDatastore` **不做数值归一化**，uint8 图读出来是 0~255；不加
+   `transform(..., @rescaleInputTable)` 就会「训练吃 0~255、推理喂 0~1」，模型恒定输出同一个字；
+   ② 合成车牌里非目标槽位的填充字符必须**按位合法**，否则等于让 CNN 看到「第 1 位是数字」这种
+   车牌上不存在的画面。
+
    公开数据集：CCPD（https://github.com/detectRecog/CCPD ）、CBLPRD-330k。
 3. **只支持单层中国车牌**，双层黄牌（挂车 / 客车）、军牌、使领馆牌需要额外处理。
    白底警用车牌已支持（`plateFormat.m` 末位允许 `警`，`locatePlate.m` 有白底兜底通道）。
