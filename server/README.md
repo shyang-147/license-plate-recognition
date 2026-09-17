@@ -2,23 +2,21 @@
 
 > 项目总览（三种形态、算法流程、完整实测表）见[仓库根目录 README](../README.md)。
 
-> **先看这里**：如果你只是想要"上传照片 → 看车牌号"，而且不想装 MATLAB / 不想开服务，
-> 请用 **`site/index.html`** —— 一个 HTML 文件，双击就能用，
-> 拷到手机上也一样跑（识别在浏览器里完成，不依赖这台电脑）。
->
-> 本目录（`server`）是"Python 起网页服务 + 调本机 MATLAB 引擎"的版本，
-> 准确率最高，但**必须把 server.py 和 start_lan.bat 放在同一个文件夹里**，
-> 只拷一个 bat 出去会报 `can't open file 'server.py'`。
+只想「上传照片 → 看车牌号」、又不想装 MATLAB 或开服务的话，直接用 `site/index.html`：
+一个 HTML 文件，双击就能跑，拷到手机上也一样，识别在浏览器里完成，不依赖这台电脑。
+
+本目录是「Python 起网页服务 + 调本机 MATLAB 引擎」的版本，准确率最高，但 `server.py` 和
+`start_lan.bat` 必须放在同一个文件夹里，只拷一个 bat 出去会报 `can't open file 'server.py'`。
 
 浏览器上传车牌照片 → 本机 MATLAB 实时识别 → 网页显示车牌号、逐字符置信度和校正后的车牌图。
-**整条链路都跑在你自己电脑上，图片不上传任何云端。**
+整条链路都跑在你自己电脑上，图片不上传任何云端。
 
 ![界面截图](screenshot.png)
 
-> **只想拷一个文件、不想管目录结构？** 用 `portable/` 里的单文件版：
-> 网页 + MATLAB 识别内核 + worker 全部打包成 **一个 `lpr_server.py`（约 253 KB）**，
-> 拷到任何地方双击 `start_lan.bat` 就能跑，还带一个 `start_public.bat` 公网模式
-> （自动开 cloudflared 隧道 + 随机访问口令，手机用 4G 也能打开）。详见 `portable/README.md`。
+不想管目录结构、只想拷一个文件的话，用 `portable/` 里的单文件版：网页、MATLAB 识别内核、
+worker 全部打包成一个 `lpr_server.py`（约 253 KB），拷到任何地方双击 `start_lan.bat` 就能跑，
+还带一个 `start_public.bat` 公网模式（自动开 cloudflared 隧道 + 随机访问口令，手机用 4G
+也能打开）。详见 `portable/README.md`。
 
 ---
 
