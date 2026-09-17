@@ -1,4 +1,4 @@
-function S = bench_eval(benchDir, verbose, csvName)
+function S = bench_eval(benchDir, verbose, csvName, engine)
 %BENCH_EVAL 在带标注的图片集上评估识别率(供 bench_run.m / verify_lpr.m 调用)
 %
 %   S = BENCH_EVAL()                     % 默认用工程自带 bench/
@@ -15,6 +15,7 @@ if nargin < 1 || isempty(benchDir)
 end
 if nargin < 2 || isempty(verbose), verbose = true; end
 if nargin < 3 || isempty(csvName), csvName = 'labels.csv'; end
+if nargin < 4 || isempty(engine),   engine   = 'template';  end
 
 csvFile = fullfile(benchDir, csvName);
 if exist(csvFile, 'file') ~= 2          % 报错前按两种惯用文件名再找一遍
@@ -46,7 +47,7 @@ for i = 1:n
     fp = fullfile(benchDir, f);
     t0 = tic;
     if exist(fp, 'file') == 2
-        r = lpr_main(fp, 'ShowFigure', false);
+        r = lpr_main(fp, 'ShowFigure', false, 'Engine', engine);
     else
         warning('bench_eval:missingImage', '缺少图片: %s', f);
         r = struct('text', '', 'chars', {{}}, 'scores', []);

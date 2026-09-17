@@ -38,6 +38,7 @@ import math
 import io
 import os
 import re
+import time
 import urllib.request
 import zlib
 import zipfile
@@ -71,9 +72,20 @@ class HttpRangeFile(io.RawIOBase):
         self.url = url
         handlers = [urllib.request.ProxyHandler({'http': proxy, 'https': proxy})] if proxy else []
         self.opener = urllib.request.build_opener(*handlers)
+        # 建连也重试: HuggingFace 偶发直接给 SSL EOF, 一次失败就整个任务挂掉不划算
         req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
-        with self.opener.open(req, timeout=60) as r:
-            self.size = int(r.headers['Content-Length'])
+        last = None
+        self.size = None
+        for i in range(6):
+            try:
+                with self.opener.open(req, timeout=60) as r:
+                    self.size = int(r.headers['Content-Length'])
+                break
+            except Exception as e:                      # noqa: BLE001 - 网络层什么都可能抛
+                last = '%s: %s' % (type(e).__name__, e)
+                time.sleep(1.5 * (i + 1))
+        if self.size is None:
+            raise IOError('无法读取 %s 的长度 (%s)' % (url, last))
         self.pos = 0
         self.requests = 0
 
@@ -90,12 +102,28 @@ class HttpRangeFile(io.RawIOBase):
     def readable(self):
         return True
 
-    def fetch(self, start, end):
-        req = urllib.request.Request(
-            self.url, headers={'Range': 'bytes=%d-%d' % (start, end), 'User-Agent': 'Mozilla/5.0'})
-        with self.opener.open(req, timeout=180) as r:
-            self.requests += 1
-            return r.read()
+    def fetch(self, start, end, tries=5):
+        """取 [start, end] 这段字节。HuggingFace 偶发会在传输中途断流,
+        所以任何网络异常都重试; 重试仍失败就把区间一切两半分别取(见 fetch_images)。"""
+        last = None
+        for i in range(tries):
+            req = urllib.request.Request(
+                self.url, headers={'Range': 'bytes=%d-%d' % (start, end),
+                                   'User-Agent': 'Mozilla/5.0'})
+            try:
+                with self.opener.open(req, timeout=180) as r:
+                    self.requests += 1
+                    data = r.read()
+                if len(data) == end - start + 1:
+                    return data
+                last = '短读 %d/%d' % (len(data), end - start + 1)
+            except Exception as e:                      # noqa: BLE001 - 网络层什么都可能抛
+                last = '%s: %s' % (type(e).__name__, e)
+            time.sleep(1.5 * (i + 1))
+        if end - start > (1 << 20):        # 还失败就把区间切两半分别取(>1 MB 才切)
+            mid = (start + end) // 2
+            return self.fetch(start, mid, tries) + self.fetch(mid + 1, end, tries)
+        raise IOError('Range %d-%d 重试 %d 次仍失败 (%s)' % (start, end, tries, last))
 
     def readinto(self, b):
         n = len(b)
@@ -181,6 +209,19 @@ def label_row(relpath, rec):
             b[0], b[1], b[2], b[3]] + list(rec['quad'])
 
 
+def load_excluded(paths):
+    """读若干 labels.csv, 收集其中出现过的图片文件名 —— 保证新抓的图与它们不重叠"""
+    drop = set()
+    for p in paths:
+        if not os.path.isfile(p):
+            print('      ⚠ --exclude 找不到文件, 已忽略: %s' % p)
+            continue
+        with open(p, encoding='utf-8-sig', newline='') as f:
+            for row in csv.DictReader(f):
+                drop.add(os.path.basename(row['file']))
+    return drop
+
+
 def stratified(records, max_n, per_subset):
     """按 subset 轮转, 每个 subset 内按车牌宽等距抽 —— 小目标到大目标都要有"""
     by = {}
@@ -251,6 +292,8 @@ def main():
     ap.add_argument('--no-proxy', action='store_true', help='直连(系统代理已开时用这个)')
     ap.add_argument('--relabel', action='store_true',
                     help='不联网: 只按 --out 里已有的文件名重写 labels.csv(改了取框口径后用)')
+    ap.add_argument('--exclude', action='append', default=[], metavar='LABELS_CSV',
+                    help='排除这些 labels.csv 里已经出现过的图(可重复), 用来抓一批与评测集不重叠的训练图')
     a = ap.parse_args()
     proxy = None if a.no_proxy else a.proxy
 
@@ -291,6 +334,13 @@ def main():
         sub[e['rec']['subset']] = sub.get(e['rec']['subset'], 0) + 1
     print('[2/4] 可解析 %d 张 (无车牌/解析不了 %d 张)' % (len(parsed), bad))
     print('      subset 分布: ' + ', '.join('%s=%d' % kv for kv in sorted(sub.items())))
+
+    drop = load_excluded(a.exclude)
+    if drop:
+        before = len(parsed)
+        parsed = [e for e in parsed if os.path.basename(e['info'].filename) not in drop]
+        print('      排除 %d 个已用过的文件名 -> 候选 %d 张 (原 %d)'
+              % (len(drop), len(parsed), before))
 
     picks = stratified(parsed, a.max, a.per_subset)
     noplate = [e for e in parsed if e['rec'].get('noplate')]

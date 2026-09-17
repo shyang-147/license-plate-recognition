@@ -16,6 +16,11 @@ server/portable/*.zip
 # ---- MATLAB ----
 # 难集评测图由 tools/make_hard.py 本地生成, 不进版本库(体积大且可复现)
 matlab/hard/
+
+# 字符 CNN 的样本与模型: 由 tools/make_char_data.m + matlab/train_char_cnn.m 本地生成
+# (约 25 MB; 真实域样本来自 CCPD 真实号牌, 同理不入库)
+matlab/charData/
+matlab/charNet.mat
 *.asv
 *.m~
 slprj/

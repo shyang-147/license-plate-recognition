@@ -27,6 +27,9 @@ p = inputParser;
 p.addRequired('imagePath');
 p.addParameter('ShowFigure', true);
 p.addParameter('MaxSize', 1600);      % 长边限制, 加速处理
+p.addParameter('Engine', 'template'); % 'template' = 模板匹配(默认); 'cnn' = 固定槽位 + CNN
+p.addParameter('PlateDigits', []);    % 已知位数 7/8 时传进来(如已判出绿牌=8);
+                                      % 留空 = max(四角实测投影比例, 440/140), 见 correctPlate/targetAspect
 p.parse(imagePath, varargin{:});
 opt = p.Results;
 
@@ -66,18 +69,35 @@ fprintf('[2/5] 车牌位置: x=%d y=%d w=%d h=%d (矩形度 %.2f, 底色占比 %
 
 % ------------------------- 2. 裁剪 + 倾斜校正 -------------------------
 [plateGray, plateColor, plateMask] = cropPlate(I, plateBox, plateMask);
-[plateGray, plateColor, cinfo] = correctPlate(plateGray, plateColor, plateMask);
-fprintf('[3/5] 校正后车牌: %d x %d (几何校正: %s, 倾角 %.2f°)\n', ...
-        size(plateGray, 1), size(plateGray, 2), cinfo.mode, cinfo.skew);
+[plateGray, plateColor, cinfo] = correctPlate(plateGray, plateColor, plateMask, opt.PlateDigits);
+fprintf('[3/5] 校正后车牌: %d x %d (几何校正: %s, 倾角 %.2f°%s)\n', ...
+        size(plateGray, 1), size(plateGray, 2), cinfo.mode, cinfo.skew, aspNote(cinfo));
 
-% ------------------------- 3. 字符分割 -------------------------
-[charImages, bwPlate, ~, inkAR] = segmentChars(plateGray);
-fmt = plateFormat(numel(charImages));            % 按位数判定车牌制式(7 位普通 / 8 位新能源)
-fprintf('[4/5] 分割出 %d 个字符 (制式: %s)\n', numel(charImages), fmt.label);
+% ------------------------- 3~4. 字符分割 + 识别 -------------------------
+% 两条路子, 由 Engine 选:
+%   'template'(默认): 二值化 + 垂直投影分割 + 模板匹配。与历史版本逐字节一致,
+%                     bench/images 的零回归门槛就是按这条口径定的。
+%   'cnn'           : 固定槽位切字符 + CNN 分类。绕开分割 —— 第九轮取证显示,
+%                     即使用真值框把车牌裁得严丝合缝, 分割也只有 53.1% 能切对
+%                     位数, 真实照片上"二值化 + 投影"本身才是瓶颈。
+if strcmpi(opt.Engine, 'cnn')
+    R  = recognizePlateCNN(plateGray, 'Model', cnnModel());
+    charImages = R.cells;
+    bwPlate    = [];
+    inkAR      = [];
+    plateText  = R.text;
+    chars      = R.chars;
+    scores     = R.scores;
+    fmt        = R.format;
+    fprintf('[4/5] 固定槽位切出 %d 个字符 (制式: %s)\n', numel(charImages), fmt.label);
+else
+    [charImages, bwPlate, ~, inkAR] = segmentChars(plateGray);
+    fmt = plateFormat(numel(charImages));        % 按位数判定车牌制式(7 位普通 / 8 位新能源)
+    fprintf('[4/5] 分割出 %d 个字符 (制式: %s)\n', numel(charImages), fmt.label);
 
-% ------------------------- 4. 字符识别 -------------------------
-% 按制式逐位限定候选字符集, 并用墨迹宽高比纠正 1/4 这类形状混淆
-[plateText, chars, scores] = recognizeChars(charImages, 'InkAR', inkAR, 'Format', fmt);
+    % 按制式逐位限定候选字符集, 并用墨迹宽高比纠正 1/4 这类形状混淆
+    [plateText, chars, scores] = recognizeChars(charImages, 'InkAR', inkAR, 'Format', fmt);
+end
 if isempty(scores)
     ms = 0;
 else
@@ -95,6 +115,7 @@ results.plateImage = plateColor;
 results.charImages = charImages;
 results.format  = fmt.label;
 results.charCount = numel(charImages);
+results.engine  = opt.Engine;
 results.correctInfo = cinfo;
 results.reason  = '';
 results.scoreInfo = scInfo;
@@ -105,6 +126,34 @@ end
 end
 
 % ======================== 以下为局部函数 ========================
+
+function s = aspNote(cinfo)
+%ASPNOTE [3/5] 行的附注: 走透视分支时说明用了哪个目标宽高比、比例是哪来的
+%   调试"斜拍拉正后字符仍然瘦长"这类问题时, 先看这一行就够了。
+if isfield(cinfo, 'outW') && ~isempty(cinfo.outW)
+    s = sprintf(', 目标宽高比 %.3f (%s) -> 宽 %d', ...
+                cinfo.asp, cinfo.aspSource, cinfo.outW);
+else
+    s = '';
+end
+end
+
+function S = cnnModel()
+%CNNMODEL 惰性加载 charNet.mat(同一个 MATLAB 会话里只读一次)
+%   bench_eval 会连着跑几十上百张图, 每张都 load 一次 40 MB 的模型是纯浪费。
+%   用 persistent 缓存, 一次会话只读一次。
+persistent cache
+if isempty(cache)
+    f = fullfile(fileparts(mfilename('fullpath')), 'charNet.mat');
+    if exist(f, 'file') ~= 2
+        error('lpr:noCnnModel', ...
+            ['Engine=''cnn'' 需要 %s, 但文件不存在。\n' ...
+             '先跑 tools/make_char_data.m 造样本, 再跑 train_char_cnn.m 训练。'], f);
+    end
+    cache = load(f, 'net', 'classNames');
+end
+S = cache;
+end
 
 function r = emptyResult()
 r = struct();
@@ -156,6 +205,7 @@ else
     mosaic = [];
     for k = 1:numel(charImages)
         ch = charImages{k};
+        if ~islogical(ch), ch = ch > 0.5; end   % CNN 路线给的是灰度格, 显示时二值化
         if isempty(mosaic)
             mosaic = ch;
         else
