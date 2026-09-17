@@ -1421,6 +1421,37 @@ function hasPerspective(q) {
   return dw > 0.08 || dh > 0.08 || dev > 10;
 }
 
+/* 单应校正的**目标宽高比**: 用国标规范比例, 而不是四角在图像里量到的投影比例。
+   与 MATLAB 版 correctPlate.m 的 local function targetAspect 一一对应。
+
+   四角量出来的宽高比 = 车牌被透视压缩后的投影比例, 拿它当目标矩形等于把透视压缩
+   留在校正结果里: 斜拍车牌拉正后字符仍是瘦长的, 而 segmentChars 的字符间隙阈值是
+   绝对像素, 间隙跟着变窄就并字。国标(GA 36-2018): 蓝/黄/白底 440x140,
+   小型新能源绿牌 480x140。第十轮 A/B(真值四角口径): 切对位数比例 53.1% -> 59.7%。
+
+   位数在校正这一步还不知道(要靠后面的分割/识别才能定), 所以规则是
+   **只补压缩, 不制造压缩**: asp = max(实测比例, 440/140)。
+     实测比例 < 440/140 -> 拉到 440/140   (补回透视压缩)
+     实测比例 > 440/140 -> 维持实测比例   (多出来的宽度不是车牌形状, 不能压)
+   为什么不一律压到 440/140(第十一轮): 检测四角比真值四角中位偏宽 +0.74
+   (走透视的 75 张: 检测 3.456 vs 真值 2.789)。对这些本来就过宽的输入再按 3.143
+   压回去, 等于把字符和字间空隙一起压窄 —— 端到端实测(run_stage, 7 个数据集)
+   一律压会丢掉 hard 集一张原本完全正确的牌(pe06, 检测比例 3.306), 只补压缩则
+   零整牌回归(字符数 ±1, 噪声)。见 结果记录/stage_第十一轮_*.txt。
+   "按检测四角比例就近吸附到 440/480" 也试过并**已否决**: 62 张 7 位牌里 51.6%
+   被误吸到 480(凭空多给 9% 宽), 有偏的信号不如不要。
+   调用方若已知道位数, 用 options.digits = 7 / 8 走精确分支。
+   ⚠ 只有"位数确实不是 7"时才值得传: digits = 7 会强制压到 440/140(等价于被否决的
+   "一律 201"), 在当前检测框偏宽时反而更差 —— MATLAB 侧 hard/pe06 实测: 不传 -> 212 px
+   读对, 传 7 -> 201 px 读错。7 位牌等定位框收紧之后再传。 */
+var AR_SMALL = 440 / 140, AR_GREEN = 480 / 140;
+function targetAspect(digits, measAR) {
+  if (digits === 8) { return AR_GREEN; }
+  if (digits) { return AR_SMALL; }            /* 显式给了 7(或其它) -> 按 7 位规范 */
+  if (isFinite(measAR) && measAR > AR_SMALL) { return measAR; }
+  return AR_SMALL;
+}
+
 /* 高斯消元解 8x8 线性方程组(列主元), 奇异时返回 null */
 function solve8(A, b) {
   var n = 8, i, j, k;
@@ -1607,9 +1638,13 @@ function run(imgData, options) {
     var qwB = hyp2(quadFull[2][0] - quadFull[3][0], quadFull[2][1] - quadFull[3][1]);
     var qhL = hyp2(quadFull[3][0] - quadFull[0][0], quadFull[3][1] - quadFull[0][1]);
     var qhR = hyp2(quadFull[2][0] - quadFull[1][0], quadFull[2][1] - quadFull[1][1]);
-    var ow = Math.round(64 * (qwT + qwB) / Math.max(1e-6, qhL + qhR));
+    var measAR = (qwT + qwB) / Math.max(1e-6, qhL + qhR);
+    var asp = targetAspect(options.digits, measAR);
+    var ow = Math.round(64 * asp);
     crop = warpQuad(crop.data, crop.w, crop.h, 4, quadFull, clamp(ow, 24, 512), 64);
     res.geom = 'perspective';
+    res.asp = asp;
+    res.measAR = measAR;
   } else if (useAng !== 0) {
     var rotC = rotateLoose(crop.data, crop.w, crop.h, 4, useAng, true);
     var rotM = rotateLoose(maskC.data, mw, mh, 1, useAng, false);
@@ -1690,6 +1725,7 @@ var API = {
     rotateLoose: rotateLoose, rgbaToGrayF: rgbaToGrayF, resize: resize,
     estimateSkew: estimateSkew, tightBox: tightBox, makeScratch: makeScratch,
     detectQuad: detectQuad, hasPerspective: hasPerspective, warpQuad: warpQuad,
+    targetAspect: targetAspect,
     plateFormat: plateFormat, chooseCount: chooseCount,
     holesOf: holesOf, holesOfBin: holesOfBin, unsharpF: unsharpF,
     getTemplates: function () { return TEMPLATES; }
