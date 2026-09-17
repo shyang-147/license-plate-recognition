@@ -894,6 +894,99 @@ function tightBox(mask, w, h) {
    (数字 1 的竖线、汉字细横等), 使笔画粗细更接近 MATLAB 版。 */
 var THR_SCALE = 1.0;
 
+/* ---------------- 识别侧低分辨率增强(第八轮) ----------------
+   HOLE_W   孔洞数不一致的罚分(默认 0.04, 与 MATLAB recognizeChars.m 的
+            'HoleWeight' 对齐): 低分辨率车牌放大后笔画被插值喂胖, "0" 的孔洞
+            只剩 1~2 px, 得分与 "8" 精确打平(0.584 vs 0.584), 只能靠模板顺序
+            取胜。孔洞数是拓扑量, 不受笔画粗细影响, 一罚就打破这种平局。
+   USM_*    放大到 64 高之后的 USM 锐化(amount 0.6 / sigma 1.0, 与 MATLAB
+            correctPlate.m 的 unsharp 对齐)。只对"放大"(s > 1.05)生效, 原图
+            本来就有 64 高左右的完全不走这条路, 所以 bench/真实集零影响。 */
+var HOLE_W = 0.04;
+var HOLE_THR = 0.5;
+var USM_AMOUNT = 0.6;
+var USM_SIGMA = 1.0;
+
+/* 孔洞数: 24x12 二值特征的拓扑量, 与 MATLAB holesOf 同口径 ——
+   从边界灌水标出"外部背景", 剩下的背景连通域就是孔洞; 面积 < 2 px 的孔洞是
+   插值毛刺, 不算(bwareaopen(bw,2))。 */
+/* 注意 charFeature 的展开顺序是列优先(index = x*24 + y, 与 MATLAB 的 f(:)' 一致),
+   而下面的灌水按行优先走, 所以先用 holesOf 转一遍, 否则连通关系全错。 */
+function holesOf(f, thr) {
+  var bw = new Uint8Array(288), x, y;
+  for (x = 0; x < 12; x++) {
+    for (y = 0; y < 24; y++) { bw[y * 12 + x] = f[x * 24 + y] > thr ? 1 : 0; }
+  }
+  return holesOfBin(bw, 12, 24);
+}
+
+function holesOfBin(bw, w, h) {
+  var n = w * h, i, p, q, r, area, comp = 0;
+  var outer = new Uint8Array(n), st = [];
+  for (i = 0; i < n; i++) {
+    if (bw[i]) { continue; }
+    var x0 = i % w, y0 = (i - x0) / w;
+    if (x0 === 0 || y0 === 0 || x0 === w - 1 || y0 === h - 1) { st.push(i); }
+  }
+  while (st.length) {
+    p = st.pop();
+    if (outer[p] || bw[p]) { continue; }
+    outer[p] = 1;
+    var px = p % w, py = (p - px) / w;
+    if (px > 0) { st.push(p - 1); }
+    if (px < w - 1) { st.push(p + 1); }
+    if (py > 0) { st.push(p - w); }
+    if (py < h - 1) { st.push(p + w); }
+  }
+  var seen = new Uint8Array(n);
+  for (i = 0; i < n; i++) {
+    if (bw[i] || outer[i] || seen[i]) { continue; }
+    area = 0; q = [i]; seen[i] = 1;
+    while (q.length) {
+      r = q.pop(); area++;
+      var rx = r % w, ry = (r - rx) / w;
+      if (rx > 0 && !seen[r - 1] && !bw[r - 1] && !outer[r - 1]) { seen[r - 1] = 1; q.push(r - 1); }
+      if (rx < w - 1 && !seen[r + 1] && !bw[r + 1] && !outer[r + 1]) { seen[r + 1] = 1; q.push(r + 1); }
+      if (ry > 0 && !seen[r - w] && !bw[r - w] && !outer[r - w]) { seen[r - w] = 1; q.push(r - w); }
+      if (ry < h - 1 && !seen[r + w] && !bw[r + w] && !outer[r + w]) { seen[r + w] = 1; q.push(r + w); }
+    }
+    if (area >= 2) { comp++; }
+  }
+  return comp;
+}
+
+/* USM 锐化 g + amount*(g - 高斯(g)), 5x5 sigma 高斯核 + replicate 边界,
+   与 MATLAB imfilter(..., 'replicate') 同口径。只锐化灰度(分割/识别只用灰度)。 */
+function unsharpF(g, w, h, amount, sigma) {
+  if (!(amount > 0)) { return g; }
+  var r = 2, dx, dy, t;
+  var k = new Float32Array(25), s = 0;
+  for (dy = -r; dy <= r; dy++) {
+    for (dx = -r; dx <= r; dx++) {
+      var v = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+      k[(dy + r) * 5 + (dx + r)] = v; s += v;
+    }
+  }
+  for (t = 0; t < 25; t++) { k[t] /= s; }
+  var out = new Float32Array(w * h);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var acc = 0;
+      for (dy = -r; dy <= r; dy++) {
+        var yy = y + dy; if (yy < 0) { yy = 0; } else if (yy > h - 1) { yy = h - 1; }
+        for (dx = -r; dx <= r; dx++) {
+          var xx = x + dx; if (xx < 0) { xx = 0; } else if (xx > w - 1) { xx = w - 1; }
+          acc += g[yy * w + xx] * k[(dy + r) * 5 + (dx + r)];
+        }
+      }
+      var gv = g[y * w + x];
+      var val = gv + amount * (gv - acc);
+      out[y * w + x] = val < 0 ? 0 : (val > 1 ? 1 : val);
+    }
+  }
+  return out;
+}
+
 
 /* ---------------- 光照归一化(除法模型, 兼容深底白字和浅底黑字) ---------------- */
 function illumNormalize(gray, w, h) {
@@ -1291,7 +1384,8 @@ function prepSet(labels, featB64) {
     mean /= raw.length;
     var cen = new Float32Array(raw.length), norm2 = 0;
     for (var k2 = 0; k2 < raw.length; k2++) { var d = f[k2] - mean; cen[k2] = d; norm2 += d * d; }
-    out.items.push({ label: labels[i], gb: gb, ones: ng, cen: cen, norm: Math.sqrt(norm2), feat: f });
+    out.items.push({ label: labels[i], gb: gb, ones: ng, cen: cen, norm: Math.sqrt(norm2), feat: f,
+                     holes: holesOf(f, 0.5) });
   }
   return out;
 }
@@ -1328,12 +1422,18 @@ function bestMatch(f, set, opts) {
                                               0.35 -> hard 50.0%/80.5%, bench 95.0%/99.3%
      机制: 降阈值会把笔画喂胖(MATLAB 侧"3"变"8"、"0"变"9"), 但本文件的
      降采样/归一化更"细瘦", 需要松一点才能保住细笔画。改这个值前请重跑两边的
-     run_js.mjs 与 run_all, 不要只调一边。 */
+     run_js.mjs 与 run_all, 不要只调一边。
+     注: 上面四行是第八轮识别侧增强**之前**扫出来的口径(当时 bench 90.0%/98.6%);
+     加了孔洞罚分 + USM 之后两版都涨了(本文件 bench 95.0%/99.3%), 结论没变: 阈值仍是
+     本文件 0.35 / MATLAB 0.5。第八轮之后的对照见 site/README.md 的实测表。 */
   for (i = 0; i < n; i++) { if (f[i] > 0.35) { fb[i] = 1; nf++; } meanF += f[i]; }
   meanF /= n;
   var fa = new Float32Array(n), acc = 0;
   for (i = 0; i < n; i++) { var d = f[i] - meanF; fa[i] = d; acc += d * d; }
   var nfNorm = Math.sqrt(acc);
+  /* 查询侧孔洞数: 与 MATLAB holesOf 同口径, 单独按 0.5 二值(不是上面 IoU 用的阈值,
+     两边最优阈值不同, 见上一段注释), 否则查询/模板的孔洞数不同口径, 反而罚错。 */
+  var hq = holesOf(f, HOLE_THR);
   var label = '?', score = -Infinity;
   for (k = 0; k < set.items.length; k++) {
     var it = set.items[k];
@@ -1350,6 +1450,7 @@ function bestMatch(f, set, opts) {
     var den = nfNorm * it.norm;
     var cc = den < 1e-12 ? 0 : dot / den;
     var sc = 0.65 * iou + 0.35 * cc;
+    if (HOLE_W > 0 && it.holes !== hq) { sc -= HOLE_W; }
     if (sc > score) { score = sc; label = it.label; }
   }
   return { label: label, score: score };
@@ -1713,6 +1814,7 @@ function run(imgData, options) {
   /* 高度归一化到 64 */
   var t3 = Date.now();
   var plateRGBA = crop;
+  var upscaled = false;
   if (crop.h >= 8 && Math.abs(64 / crop.h - 1) > 0.01) {
     var fIn = new Float32Array(crop.w * crop.h * 4);
     for (var i = 0; i < fIn.length; i++) { fIn[i] = crop.data[i]; }
@@ -1721,11 +1823,13 @@ function run(imgData, options) {
     var u8 = new Uint8ClampedArray(dw2 * dh * 4);
     for (var j = 0; j < u8.length; j++) { u8[j] = fOut[j]; }
     plateRGBA = { data: u8, w: dw2, h: dh };
+    upscaled = 64 / crop.h > 1.05;
   }
   T.normalize = Date.now() - t3;
 
   var t4 = Date.now();
   var pg = rgbaToGrayF(plateRGBA.data, plateRGBA.w, plateRGBA.h);
+  if (upscaled) { pg = unsharpF(pg, plateRGBA.w, plateRGBA.h, USM_AMOUNT, USM_SIGMA); }
   var seg = segmentChars(pg, plateRGBA.w, plateRGBA.h);
   T.segment = Date.now() - t4;
 
@@ -1754,6 +1858,9 @@ var API = {
   setTemplates: setTemplates,
   ready: function () { return TEMPLATES !== null; },
   setThrScale: function (v) { THR_SCALE = v; },
+  setHoleWeight: function (v) { HOLE_W = v; },
+  setHoleThreshold: function (v) { HOLE_THR = v; },
+  setUnsharp: function (a, s) { USM_AMOUNT = a; if (s) { USM_SIGMA = s; } },
   _internals: {
     illumNormalize: illumNormalize, otsu: otsu, removeFrameLocal: removeFrameLocal,
     areaOpen: areaOpen, normalizeChar: normalizeChar, charFeature: charFeature,
@@ -1764,6 +1871,7 @@ var API = {
     estimateSkew: estimateSkew, tightBox: tightBox, makeScratch: makeScratch,
     detectQuad: detectQuad, hasPerspective: hasPerspective, warpQuad: warpQuad,
     plateFormat: plateFormat, chooseCount: chooseCount,
+    holesOf: holesOf, holesOfBin: holesOfBin, unsharpF: unsharpF,
     getTemplates: function () { return TEMPLATES; }
   }
 };

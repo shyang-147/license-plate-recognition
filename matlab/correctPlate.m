@@ -76,11 +76,33 @@ end
 % ---------------- 3. 统一高度 ----------------
 if size(gray, 1) >= 8
     s = targetH / size(gray, 1);
-    if abs(s - 1) > 0.01
+    if s > 1.05
+        % 放大: 双三次 + 轻度 USM 锐化。小号牌(几十像素高)放大到 64 之后笔画是
+        % 软的, 二值化会把笔画喂胖一圈(实测 105 px 车牌上 "0" 的孔洞被挤到只剩
+        % 1~2 px), 匹配前先把边补回来。
+        gray  = imresize(gray,  s, 'bicubic');
+        color = imresize(color, s, 'bicubic');
+        gray  = unsharp(gray);
+    elseif abs(s - 1) > 0.01
         gray  = imresize(gray,  s, 'bilinear');
         color = imresize(color, s, 'bilinear');
     end
 end
+end
+
+function g = unsharp(g, amount, sigma)
+%UNSHARP 轻度 USM 锐化 g + amount*(g - 高斯模糊(g)), 只用于"放大"这一步
+%   只锐化灰度图 —— 后续分割/识别只用灰度, 彩色图只用于显示。
+%   默认刻意取小(amount 0.6): 锐化过头会把插值的振铃放大成假笔画。
+if nargin < 2 || isempty(amount), amount = 0.6; end
+if nargin < 3 || isempty(sigma),  sigma  = 1.0; end
+if amount <= 0, return; end
+cls = class(g);
+d = double(g);
+if isinteger(g), d = d / double(intmax(cls)); end
+b = imfilter(d, fspecial('gaussian', [5 5], sigma), 'replicate');
+d = min(1, max(0, d + amount * (d - b)));
+if isinteger(g), g = cast(d * double(intmax(cls)), cls); else, g = d; end
 end
 
 % ======================== 局部函数 ========================
