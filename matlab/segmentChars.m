@@ -1,20 +1,34 @@
-function [charImages, bwPlate, bounds, inkAR] = segmentChars(plateGray)
+function [charImages, bwPlate, bounds, inkAR] = segmentChars(plateGray, varargin)
 %SEGMENTCHARS 车牌字符分割(垂直投影法)
 %
 %   [charImages, bwPlate, bounds] = SEGMENTCHARS(plateGray)
+%   [...] = SEGMENTCHARS(plateGray, 'BinMode', 'adapt', 'AdaptSens', 0.5)
 %   plateGray : 已校正、高度归一化(64)的灰度车牌
 %   charImages: 1xN cell, 每个元素是 32x16 logical 的归一化字符
 %   bwPlate   : 二值化结果(字符=白), 便于调试查看
 %   bounds    : N x 2, 每个字符在车牌中的列区间 [起 止]
 %   inkAR     : 1xN double, 每个字符墨迹外接框的宽高比(细长段 -> 数字 1)
 %
-%   流程: 光照均衡 -> Otsu 二值化 -> 统一极性 -> 去外框 -> 去噪
+%   二值化口径(BinMode, 默认 'clahe' = 现状):
+%     'clahe'   CLAHE + 全局 Otsu(灰度阈值)。自产合成图上很干净, 但真实照片上
+%               车牌左右亮度不均、整体发虚, 全局阈值会把字与字粘在一起(第九轮 P0-1)
+%     'adapt'   CLAHE + imbinarize 的局部自适应(局部均值), 窗口见 WinDiv
+%     'sauvola' CLAHE + Sauvola(局部均值 + 局部标准差), T = m*(1+k*(s/R-1))
+%     'sauvola_dark' / 'sauvola_bright'  强制极性(仅供 A/B, 正式流程用 'sauvola')
+%     'perchar' CLAHE + 全局 Otsu **切段**, 再对每一段单独 Otsu(只换字的二值化,
+%               切出来的列区间与 'clahe' 完全一致) —— 针对"同一块车牌左右亮度不均"
+%   极性统一由外面那条"字符是少数"规则决定(见下), 所以各口径都不用在
+%   内部猜"字是黑还是白" —— 蓝/绿牌是白字、黄牌是黑字, 都靠这条兜住。
+%
+%   流程: 光照均衡 -> 二值化 -> 统一极性 -> 去外框 -> 去噪
 %         -> 垂直投影取字符段 -> 自校准定字数并拆分/合并 -> 归一化
 %
 %   关键参数都在下面注释里标了, 分割不对时优先调这三处:
 %     1) mergeRuns 的间隙阈值  (汉字被切散 -> 调大; 相邻字粘连 -> 调小)
 %     2) 列阈值 thr            (窄笔画如数字 1 的撇被切掉 -> 调小)
 %     3) chooseCount 的候选范围 (目前 6~8, 双排牌切错时可临时收窄)
+
+opt = parseOpts(varargin{:});
 
 if size(plateGray, 3) > 1
     plateGray = rgb2gray(plateGray);
@@ -24,7 +38,7 @@ end
 % ---------------- 1. 光照均衡 + 二值化 ----------------
 g = im2double(plateGray);
 g = adapthisteq(g, 'NumTiles', [4 8], 'ClipLimit', 0.02);
-bw = imbinarize(g, graythresh(g));
+bw = binarizePlate(g, opt);
 
 % 车牌底色面积远大于字符面积 -> 保证"字符 = 白(1)"
 if nnz(bw) > 0.45 * numel(bw)
@@ -68,7 +82,11 @@ n = size(runs, 1);
 charImages = cell(1, n);
 inkAR      = zeros(1, n);
 for k = 1:n
-    seg = bw(:, runs(k, 1):runs(k, 2));
+    if strcmp(opt.BinMode, 'perchar')
+        seg = refineSegmentBW(g, bw, runs(k, :));
+    else
+        seg = bw(:, runs(k, 1):runs(k, 2));
+    end
     [rr, cc] = find(seg);
     if ~isempty(rr)
         inkAR(k) = (max(cc) - min(cc) + 1) / (max(rr) - min(rr) + 1);
@@ -78,6 +96,86 @@ end
 end
 
 % ======================== 局部函数 ========================
+
+function seg = refineSegmentBW(g, bw, cols)
+%REFINESEGMENTBW 在**已经切好的列区间**里对该段单独做一次 Otsu
+%   切段仍然沿用全局口径(所以列边界一字不变), 只把每段内部的二值化换成局部阈值。
+%   针对的是实拍侧光: 同一块车牌左边过曝、右边发暗时, 全局阈值必然有一半的字被切糊。
+%   极性沿用全局掩膜在该段的多数极性(蓝/绿牌是白字、黄牌是黑字, 不让这里再猜一次)。
+a = max(1, cols(1));  b = min(size(g, 2), cols(2));
+gg = g(:, a:b);
+t  = graythresh(gg);
+if t <= 0 || t >= 1
+    seg = bw(:, a:b);
+    return;
+end
+s1 = gg > t;
+fInk = nnz(bw(:, a:b)) / numel(bw(:, a:b));
+if abs(nnz(s1) / numel(s1) - fInk) <= abs(nnz(~s1) / numel(~s1) - fInk)
+    seg = s1;
+else
+    seg = ~s1;
+end
+seg = bwareaopen(seg, max(2, round(0.004 * numel(seg))));   % 局部阈值的小噪点
+end
+
+function opt = parseOpts(varargin)
+%PARSEOPTS 分割参数(默认值与第九轮之前逐字节一致)
+opt = struct('BinMode', 'clahe', 'AdaptSens', 0.50, 'SauvolaK', 0.20, 'WinDiv', 8);
+if mod(numel(varargin), 2) ~= 0
+    error('segmentChars:badArgs', '参数必须成对出现: Name, Value');
+end
+for i = 1:2:numel(varargin)
+    if ~isfield(opt, varargin{i})
+        error('segmentChars:badArgs', '未知参数: %s', varargin{i});
+    end
+    opt.(varargin{i}) = varargin{i + 1};
+end
+end
+
+function bw = binarizePlate(g, opt)
+%BINARIZEPLATE 按 BinMode 做二值化(字符=白由外面的"字符是少数"规则统一)
+switch opt.BinMode
+    case {'clahe', 'perchar'}
+        bw = imbinarize(g, graythresh(g));
+    case 'adapt'
+        win = 2 * round(size(g, 1) / opt.WinDiv) + 1;
+        % 注意: imbinarize 的 'adaptive' 不接受 NeighborhoodSize(那是 adaptthresh 的参数),
+        % 想要自定义窗口就得走 adaptthresh + imbinarize(T) 这条路。
+        T = adaptthresh(g, opt.AdaptSens, 'ForegroundPolarity', 'dark', ...
+                        'NeighborhoodSize', win, 'Statistic', 'mean');
+        bw = imbinarize(g, T);
+    case 'sauvola'
+        bw = sauvola(g, opt.SauvolaK, opt.WinDiv, '');
+    case 'sauvola_dark'
+        bw = sauvola(g, opt.SauvolaK, opt.WinDiv, 'dark');
+    case 'sauvola_bright'
+        bw = sauvola(g, opt.SauvolaK, opt.WinDiv, 'bright');
+    otherwise
+        error('segmentChars:binMode', '未知 BinMode: %s', opt.BinMode);
+end
+end
+
+function bw = sauvola(g, k, winDiv, polarity)
+%SAUVOLA 局部自适应阈值(Sauvola): T = m*(1 + k*(s/R - 1)), R 取 0.5(灰度动态范围的一半)
+%   m/s 是窗口内的局部均值/局部标准差, 窗口边长 2*round(H/winDiv)+1(按车牌高度取)。
+%   为什么它可能比全局 Otsu 更适合真实照片: Otsu 在整块车牌上只给一个阈值, 车牌
+%   左右亮度不均时(实拍侧光常见)一半的字会被切糊、另一半和底板粘在一起; Sauvola
+%   的阈值逐像素随局部对比度浮动, 底板平整处 s->0 -> T->0.8m(不产生墨迹),
+%   字缝处 s 大 -> T 抬高(细笔画也能留下)。
+%   polarity: 'dark' 前景=比阈值暗 | 'bright' 前景=比阈值亮 | '' 先按 dark 算,
+%   交给调用方的"字符是少数"规则翻极性。
+win = 2 * round(size(g, 1) / winDiv) + 1;
+h1 = ones(win, 1) / win;  h2 = ones(1, win) / win;
+m  = imfilter(imfilter(g, h1, 'symmetric'), h2, 'symmetric');
+m2 = imfilter(imfilter(g .^ 2, h1, 'symmetric'), h2, 'symmetric');
+s  = sqrt(max(m2 - m .^ 2, 0));
+T  = m .* (1 + k * (s / 0.5 - 1));
+switch polarity
+    case 'bright', bw = g > T;
+    otherwise,     bw = g < T;      % 'dark' 与 '' 都从这里开始
+end
+end
 
 function bw = removeFrame(bw)
 %REMOVEFRAME 抹掉车牌外框, 分三步:
