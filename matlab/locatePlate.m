@@ -65,6 +65,12 @@ minExtentW = 0.40;                % 白底候选用更低的矩形度下限
 %      当成白底车牌(这是白底通道的原理性风险, 见第五轮报告第 6 节 B)。
 minInkFr   = 0.05;                % 框内"有字符墨迹"的像素占比下限(相对框内背景)
 inkDelta   = 45/255;              % 算墨迹时的灰度差(差这么多才算字)
+% 第九轮补的第三项: **结构证据**(见文件末尾的 hasCharStructure, 与彩色通道共用一条)。
+% 理由(结果记录/probe_white_gate_第九轮.txt): 40 张真实无牌照片的 23 个误检里, **白底通道
+% 放行了 10 个**(彩色通道 12 个)。第五轮"白底通道 0/7"是拿**合成**干扰图验收的, 真实照片
+% 上这条通道反而是误检大头。补上结构证据后挡掉白底误检 8/10(误检总数 23 -> 15), 而代价
+% 实测为 0: CCPD 320 张里靠白底通道拿到的 20 个框只有 2 个是定位命中, 被它否掉的 10 个里
+% 一个命中都没有(正样本定位 113 不变)。
 maxAspectW = 3.8;                 % 白底候选长宽比上限
 % ---- 结构证据: 框里必须有"成排的字"(见 hasCharStructure) ----
 % 上面那些判据(长宽比/矩形度/底色占比/边缘密度)全是"尺度无关"的统计量, 纯随机
@@ -150,11 +156,23 @@ if ~isempty(plateBox)
     y2 = min(size(gray, 1), ceil(plateBox(2) + plateBox(4) - 1));
     structOK = hasCharStructure(gray(y1:y2, x1:x2), gates);
     if strcmp(scoreInfo.source, 'white')
-        scoreInfo.valid = scoreInfo.whiteFrac >= minWhiteFr && scoreInfo.edgesFrac >= minEdgeDen;
+        % 第九轮给白底通道补上「结构证据」(与彩色通道同一条 hasCharStructure)。
+        % 第五轮只要求"白底占比 + 垂直边缘密度", 当时用 7 张**合成**干扰图验收(0/7),
+        % 所以路线图以为这条通道风险很小; 第九轮拿 40 张**真实**无牌照片一量才发现,
+        % 误检 23 个里有 10 个是白底通道放行的(彩色通道 12 个) —— 白底通道才是真实照片
+        % 误检的大头。补上结构证据后:
+        %   负样本 ccpd_np: 挡掉白底误检 8/10 (误检总数 23 -> 15)
+        %   正样本 CCPD 320: 白底通道给出的 20 个框里只有 2 个是定位命中, 被结构证据否掉的
+        %                    10 个里**一个命中都没有** -> 定位命中 113 不变
+        %   (结果记录/probe_white_gate_第九轮.txt; 自校验: 白底 valid 规则与 info.valid 一致)
+        scoreInfo.valid = scoreInfo.whiteFrac >= minWhiteFr && scoreInfo.edgesFrac >= minEdgeDen ...
+                          && structOK;
         if scoreInfo.whiteFrac < minWhiteFr
             scoreInfo.reject = sprintf('白底候选里白色只占 %.2f (< %.2f), 不像白底车牌', scoreInfo.whiteFrac, minWhiteFr);
         elseif scoreInfo.edgesFrac < minEdgeDen
             scoreInfo.reject = sprintf('框内垂直边缘密度 %.3f < %.3f, 没有成排的字符', scoreInfo.edgesFrac, minEdgeDen);
+        elseif ~structOK
+            scoreInfo.reject = '白底候选里切不出成排的字符(结构证据不足), 不像车牌';
         end
     else
         % 四个闸门要跟 bestRegion 里的 pass 判据保持一致: 漏掉 edgesFrac 会让
