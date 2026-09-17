@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """生成难集 matlab/hard/ (24 张) + labels.csv —— 比 bench/ 难一档的评测集
 
-用法:  python tools/make_hard.py
+用法:  python tools/make_hard.py [输出目录]
 依赖:  pip install pillow
-输出:  matlab/hard/ne01~ne06.jpg 等 24 张 + labels.csv (列: file,text,category)
+输出:  <输出目录>/ne01~ne06.jpg 等 24 张 + labels.csv
+       列: file,text,category,bx,by,bw,bh   (bx..bh 是车牌在成品图里的真值框)
 
 bench/ 那 20 张都是"干净背景 + 小角度旋转"的图, 在上面调好的参数到真实照片上
 并不成立(实测 20 张只错 9 张, 真实路拍 3 张全错)。这个难集把难点分开, 每类 6 张:
@@ -18,7 +19,7 @@ bench/ 那 20 张都是"干净背景 + 小角度旋转"的图, 在上面调好�
 注意: 汉字字形取自系统字体(黑体/微软雅黑/宋体), 换机器时字体不同会得到略有差异的图。
       生成的图只用于本地评测, 已加进 .gitignore, 不进版本库。
 """
-import os, random
+import os, random, sys
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +101,7 @@ def quad_blit(scene, plate, quad):
                 dst[x, y] = px[u, v]
 
 def scene(text, angle, scale, blur, seed, warp=0.0, dim=1.0, size=(1000, 680), bgc=None):
+    """返回 (成品图, GT 车牌框)。框是"车牌在成品图里的紧包围盒"(x y w h, 0 基)。"""
     random.seed(seed)
     bg = scene_bg(size, seed, dim)
     if bgc is None:
@@ -114,10 +116,16 @@ def scene(text, angle, scale, blur, seed, warp=0.0, dim=1.0, size=(1000, 680), b
         quad = [(x0 + inset, y0), (x0 + pw - inset * 0.4, y0 + ph * 0.06),
                 (x0 + pw, y0 + ph), (x0 - inset * 0.2, y0 + ph * 0.94)]
         quad_blit(bg, plate, quad)
+        xs = [p[0] for p in quad]; ys = [p[1] for p in quad]
+        box = (int(round(min(xs))), int(round(min(ys))),
+               int(round(max(xs) - min(xs))), int(round(max(ys) - min(ys))))
     else:
         rot = plate.rotate(angle, resample=Image.BICUBIC, expand=True)
         mask = Image.new('L', plate.size, 255).rotate(angle, resample=Image.BICUBIC, expand=True)
-        bg.paste(rot, (int(cx - rot.width / 2), int(cy - rot.height / 2)), mask)
+        px, py = int(cx - rot.width / 2), int(cy - rot.height / 2)
+        bg.paste(rot, (px, py), mask)
+        bb = mask.getbbox()
+        box = (px + bb[0], py + bb[1], bb[2] - bb[0], bb[3] - bb[1])
     img = bg.filter(ImageFilter.GaussianBlur(blur))
     if dim != 1.0:
         img = img.point(lambda v: int(min(255, v * dim)))
@@ -128,9 +136,12 @@ def scene(text, angle, scale, blur, seed, warp=0.0, dim=1.0, size=(1000, 680), b
             c = px[x, y]
             g = rnd.randint(-45, 45)
             px[x, y] = tuple(max(0, min(255, q + g)) for q in c)
-    return img
+    return img, box
 
-def main():
+def main(outDir=None):
+    if outDir is None:
+        outDir = sys.argv[1] if len(sys.argv) > 1 else OUT
+    os.makedirs(outDir, exist_ok=True)
     random.seed(777)
     rows = []
     # 1) new energy, 8 chars
@@ -138,35 +149,37 @@ def main():
         text = random.choice(PROV) + random.choice('ADF') + random.choice(LETTERS) + \
                ''.join(random.choice(DIGITS) for _ in range(5))
         name = 'ne%02d.jpg' % (i + 1)
-        scene(text, random.uniform(-6, 6), random.uniform(0.75, 1.1), random.uniform(0.4, 1.0),
-              seed=200 + i, bgc=(random.randint(20, 45), random.randint(120, 160), random.randint(60, 90))
-              ).save(os.path.join(OUT, name), quality=88)
-        rows.append('%s,%s,newenergy' % (name, text))
+        img, box = scene(text, random.uniform(-6, 6), random.uniform(0.75, 1.1), random.uniform(0.4, 1.0),
+                         seed=200 + i, bgc=(random.randint(20, 45), random.randint(120, 160), random.randint(60, 90)))
+        img.save(os.path.join(outDir, name), quality=88)
+        rows.append('%s,%s,newenergy,%d,%d,%d,%d' % ((name, text) + box))
     # 2) perspective (keystone)
     for i in range(6):
         text = random.choice(PROV) + random.choice(LETTERS) + ''.join(random.choice(DIGITS) for _ in range(5))
         name = 'pe%02d.jpg' % (i + 1)
-        scene(text, 0.0, random.uniform(0.9, 1.15), random.uniform(0.4, 0.9),
-              seed=300 + i, warp=random.uniform(0.10, 0.22)).save(os.path.join(OUT, name), quality=88)
-        rows.append('%s,%s,persp' % (name, text))
+        img, box = scene(text, 0.0, random.uniform(0.9, 1.15), random.uniform(0.4, 0.9),
+                         seed=300 + i, warp=random.uniform(0.10, 0.22))
+        img.save(os.path.join(outDir, name), quality=88)
+        rows.append('%s,%s,persp,%d,%d,%d,%d' % ((name, text) + box))
     # 3) small (120-170 px wide plate)
     for i in range(6):
         text = random.choice(PROV) + random.choice(LETTERS) + ''.join(random.choice(DIGITS) for _ in range(5))
         name = 'sm%02d.jpg' % (i + 1)
         scale = random.uniform(0.27, 0.39)     # 440*0.27 = 119 px
-        scene(text, random.uniform(-5, 5), scale, random.uniform(0.3, 0.8),
-              seed=400 + i).save(os.path.join(OUT, name), quality=88)
-        rows.append('%s,%s,small' % (name, text))
+        img, box = scene(text, random.uniform(-5, 5), scale, random.uniform(0.3, 0.8), seed=400 + i)
+        img.save(os.path.join(outDir, name), quality=88)
+        rows.append('%s,%s,small,%d,%d,%d,%d' % ((name, text) + box))
     # 4) night-ish
     for i in range(6):
         text = random.choice(PROV) + random.choice(LETTERS) + ''.join(random.choice(DIGITS) for _ in range(5))
         name = 'ni%02d.jpg' % (i + 1)
-        scene(text, random.uniform(-6, 6), random.uniform(0.8, 1.1), random.uniform(0.9, 1.5),
-              seed=500 + i, dim=0.45).save(os.path.join(OUT, name), quality=80)
-        rows.append('%s,%s,night' % (name, text))
-    with open(os.path.join(OUT, 'labels.csv'), 'w', encoding='utf-8') as f:
-        f.write('file,text,category\n' + '\n'.join(rows) + '\n')
-    print('生成 %d 张难集图 -> %s' % (len(rows), OUT))
+        img, box = scene(text, random.uniform(-6, 6), random.uniform(0.8, 1.1), random.uniform(0.9, 1.5),
+                         seed=500 + i, dim=0.45)
+        img.save(os.path.join(outDir, name), quality=80)
+        rows.append('%s,%s,night,%d,%d,%d,%d' % ((name, text) + box))
+    with open(os.path.join(outDir, 'labels.csv'), 'w', encoding='utf-8') as f:
+        f.write('file,text,category,bx,by,bw,bh\n' + '\n'.join(rows) + '\n')
+    print('生成 %d 张难集图 -> %s' % (len(rows), outDir))
 
 if __name__ == '__main__':
     main()

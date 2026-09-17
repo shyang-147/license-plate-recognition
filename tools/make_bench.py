@@ -59,6 +59,7 @@ def make_plate(text, w, h, bg):
 
 
 def scene(text, angle, scale, blur, seed):
+    """返回 (成品图, GT 车牌框); 框 = 车牌在成品图里的紧包围盒 (x y w h, 0 基)。"""
     random.seed(seed)
     size = (1000, 680)
     base = random.randint(40, 80)
@@ -85,8 +86,11 @@ def scene(text, angle, scale, blur, seed):
     plate = make_plate(text, pw, ph, bgc)
     rot = plate.rotate(angle, resample=Image.BICUBIC, expand=True)
     mask = Image.new('L', plate.size, 255).rotate(angle, resample=Image.BICUBIC, expand=True)
-    bg.paste(rot, ((size[0] - rot.width) // 2, int(size[1] * 0.42)), mask)
-    return bg.filter(ImageFilter.GaussianBlur(blur))
+    px, py = (size[0] - rot.width) // 2, int(size[1] * 0.42)
+    bg.paste(rot, (px, py), mask)
+    bb = mask.getbbox()
+    box = (px + bb[0], py + bb[1], bb[2] - bb[0], bb[3] - bb[1])
+    return bg.filter(ImageFilter.GaussianBlur(blur)), box
 
 
 def main():
@@ -98,11 +102,12 @@ def main():
         scale = random.uniform(0.6, 1.15)
         blur = random.uniform(0.4, 1.2)
         name = 'bench%02d.jpg' % (i + 1)
-        scene(text, angle, scale, blur, seed=i + 100).save(os.path.join(OUT, name), quality=86)
-        rows.append('%s,%s,%.1f,%.2f,%.1f' % (name, text, angle, scale, blur))
+        img, box = scene(text, angle, scale, blur, seed=i + 100)
+        img.save(os.path.join(OUT, name), quality=86)
+        rows.append('%s,%s,%.1f,%.2f,%.1f,%d,%d,%d,%d' % ((name, text, angle, scale, blur) + box))
 
     with open(os.path.join(OUT, 'labels.csv'), 'w', encoding='utf-8') as f:
-        f.write('file,text,angle,scale,blur\n' + '\n'.join(rows) + '\n')
+        f.write('file,text,angle,scale,blur,bx,by,bw,bh\n' + '\n'.join(rows) + '\n')
     print('生成 20 张测试图 ->', OUT)
 
 
