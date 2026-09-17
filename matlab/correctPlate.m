@@ -1,9 +1,12 @@
-function [gray, color, info] = correctPlate(gray, color, mask)
+function [gray, color, info] = correctPlate(gray, color, mask, nDigits)
 %CORRECTPLATE 车牌几何校正(旋转 + 透视) + 尺寸归一化
 %
 %   [gray, color]       = CORRECTPLATE(gray, color, mask)
 %   [gray, color, info] = CORRECTPLATE(gray, color, mask)
 %   mask: 车牌掩膜(用于估计车牌四角), 可为空 []
+%   nDigits: (可选) 车牌位数 7 / 8。已知就传进来(走国标 440/140 或 480/140);
+%            留空则取 max(四角实测投影比例, 440/140) —— 只补透视压缩, 不制造压缩。
+%            原因与取证见 TARGETASPECT。
 %
 %   做法分两级:
 %     1) 透视校正(只在真的歪成梯形时启用): 用掩膜上的"极值点"定位车牌四角,
@@ -17,12 +20,20 @@ function [gray, color, info] = correctPlate(gray, color, mask)
 %              quad  采用的车牌四角(4x2, 左上->右上->右下->左下), 未用时为 []
 %              skew  旋转校正的角度(度), 透视校正时为 0
 %              reason 四角估计失败的原因(便于排查), 成功时为空
+%              asp   透视校正采用的目标宽高比(未做透视时为 [])
+%              outW  透视校正的输出宽度(未做透视时为 [])
+%              aspSource 比例来源: 'digits-7' / 'digits-8' / 'meas-wide' / 'default-7'
+%              aspMeas 四角量出来的实测投影宽高比(选择之前的原始值, 供诊断)
 %
-%   校正后统一缩放到高度 64 像素, 宽度按校正后的车牌长宽比缩放,
-%   使后续垂直投影分割的参数可以写死。
+%   校正后统一缩放到高度 64 像素, 宽度 = max(四角实测投影比例, 国标 7 位规范) * 64 ——
+%   比规范比例窄的牌照被拉宽(补回透视压缩), 比规范还宽的维持原样(多出来的宽度来自
+%   检测框外扩, 不是车牌形状)。原因与取证见 TARGETASPECT。
+
+if nargin < 4, nDigits = []; end     % MATLAB 里没传的入参是"未定义", 直接引用会报错
 
 targetH = 64;
-info = struct('mode', 'none', 'quad', [], 'skew', 0, 'reason', '');
+info = struct('mode', 'none', 'quad', [], 'skew', 0, 'reason', '', ...
+              'asp', [], 'outW', [], 'aspSource', '', 'aspMeas', []);
 
 % ---------------- 1. 优先: 四角 + 单应变换(旋转与透视一起校正) ----------------
 if nargin > 2 && ~isempty(mask) && any(mask(:))
@@ -42,7 +53,9 @@ if nargin > 2 && ~isempty(mask) && any(mask(:))
         wAvg = (wTop + wBot) / 2;
         hAvg = max(eps, (hLft + hRgt) / 2);
         outH = targetH;
-        outW = min(max(round(wAvg * targetH / hAvg), 24), 8 * targetH);
+        aspMeas = wAvg / hAvg;
+        [asp, aspSource] = targetAspect(nDigits, aspMeas);
+        outW = min(max(round(asp * targetH), 24), 8 * targetH);
         tform = quadToRectTransform(quad, outW, outH);
         view  = imref2d([outH, outW]);
         gray  = imwarp(gray,  tform, 'OutputView', view, ...
@@ -51,6 +64,10 @@ if nargin > 2 && ~isempty(mask) && any(mask(:))
                        'InterpolationMethod', 'bilinear', 'FillValues', 0);
         info.mode = 'perspective';
         info.quad = quad;
+        info.asp  = asp;
+        info.outW = outW;
+        info.aspSource = aspSource;
+        info.aspMeas = aspMeas;
         return;
     end
 end
@@ -87,6 +104,57 @@ if size(gray, 1) >= 8
         gray  = imresize(gray,  s, 'bilinear');
         color = imresize(color, s, 'bilinear');
     end
+end
+end
+
+function [asp, src] = targetAspect(nDigits, aspMeas)
+%TARGETASPECT 单应校正的目标宽高比: 用**国标规范比例**, 而不是四角量到的投影比例
+%
+%   四角点在图像里量出来的宽高比 = 车牌被透视压缩后的投影比例, 不是车牌本身的比例。
+%   拿它当目标矩形, 等于**把透视压缩原封不动留在校正结果里** —— 斜拍车牌拉正后
+%   字符仍是瘦长的, 而 segmentChars 的字符间隙阈值是**绝对像素**, 字间空隙跟着
+%   变窄就并字。号牌尺寸有国标(GA 36-2018): 蓝/黄/白底 440x140, 新能源绿牌 480x140。
+%
+%   第十轮 A/B 取证(真值四角裁片, 主指标 = segmentChars 切出字符数 == 真值位数):
+%     A 实测投影比例 53.1%  ->  C 一律按 7 位规范 59.1%  (+5.9pp)
+%     字符率 14.8% -> 16.3%; 9 个 subset 里 8 个变好(只有 ccpd_db 掉 2 张)。
+%
+%   位数不知道怎么办 —— 调用方(lpr_main / 网页版)在校正这一步确实还不知道车牌
+%   有几位, 位数本来要靠后面的分割/识别才能定。规则是 **只补压缩, 不制造压缩**:
+%     实测比例 < 440/140  ->  拉到 440/140   (补回透视压缩, 即"改用规范比例"的收益)
+%     实测比例 > 440/140  ->  维持实测比例   (多出来的宽度不是车牌形状, 不能压)
+%   即 asp = max(aspMeas, 440/140)。
+%
+%   为什么不能"一律压到 440/140"(第十一轮的教训): locatePlate 给的四角比真值四角
+%   **中位偏宽 +0.74**(走透视的 75 张: 检测 3.456 vs 真值 2.789; 7 位牌 3.379 vs
+%   2.687)。对这 75 张里**本来就过宽**的那些再按 3.143 压回去, 等于把字符和字间空隙
+%   一起压窄 —— 端到端实测(测试脚本/run_stage.m, 7 个数据集): 一律压会丢掉 hard 集
+%   一张**原本完全正确**的牌(pe06, 检测比例 3.306), 而只补压缩在 7 个集合上
+%   **零整牌回归**(字符数 ±1, 在噪声内; 见 结果记录/stage_第十一轮_*.txt)。
+%
+%   "按检测四角比例就近吸附到 440 或 480" 这条也试过, **已否决**(第十一轮): 62 张
+%   7 位牌里 51.6% 被误吸到 480(凭空多给 9% 宽), 字符率反而更低(17.9% -> 16.1%)。
+%   结论: 检测框比例不能拿来判位数 —— 有偏的信号不如不要。
+%
+%   真能提前知道位数时(例如已从颜色判出是新能源绿牌)传 nDigits 走精确分支:
+%   lpr_main('PlateDigits', 8)。真值四角口径下 8 位绿牌按 480/140 校正,
+%   字符率 A 29.3% -> 32.9%。
+%   ⚠️ 只有"位数确实不是 7"时才值得传: 传 nDigits=7 会**强制**压到 440/140(等价于上面
+%   被否决的 C), 在当前定位框偏宽时反而更差 —— hard/pe06 实测: 不传 -> 212 px 读对
+%   (鲁M50007), 传 7 -> 201 px 读错(鲁Y50007)。7 位牌等定位框收紧之后再传。
+AR_SMALL = 440 / 140;     % 蓝/黄/白底牌(7 位)
+AR_GREEN = 480 / 140;     % 新能源绿牌(8 位)
+
+if nargin < 2, aspMeas = []; end
+
+if nargin >= 1 && ~isempty(nDigits) && nDigits == 8
+    asp = AR_GREEN; src = 'digits-8';
+elseif nargin >= 1 && ~isempty(nDigits)
+    asp = AR_SMALL; src = 'digits-7';
+elseif ~isempty(aspMeas) && aspMeas > AR_SMALL
+    asp = aspMeas; src = 'meas-wide';
+else
+    asp = AR_SMALL; src = 'default-7';
 end
 end
 
