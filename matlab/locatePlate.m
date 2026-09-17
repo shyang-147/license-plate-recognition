@@ -66,6 +66,16 @@ minExtentW = 0.40;                % 白底候选用更低的矩形度下限
 minInkFr   = 0.05;                % 框内"有字符墨迹"的像素占比下限(相对框内背景)
 inkDelta   = 45/255;              % 算墨迹时的灰度差(差这么多才算字)
 maxAspectW = 3.8;                 % 白底候选长宽比上限
+% ---- 结构证据: 框里必须有"成排的字"(见 hasCharStructure) ----
+% 上面那些判据(长宽比/矩形度/底色占比/边缘密度)全是"尺度无关"的统计量, 纯随机
+% 噪声图上总能凑出一块全部过关的斑块 —— 实测 680x1000 的纯噪声图 8/8 报出凭空
+% 捏造的车牌号(第四轮起就有, 见 结果记录/第五轮_噪声图误检_实测证据.txt)。
+% 这两条只在"定位框收紧之后"复算(见文件末尾的 valid): 它衡量的是"这个框喂给
+% 分割会不会切出字", 必须在最终那个框上算; 在候选连通域的原框上算会把小号牌
+% (车牌只占框的一部分)误判成"切不出字"。
+minCharSegs = 2;                  % 字符段数下限(实测真车牌 2~9 段, 纯噪声恒为 1)
+maxCharSegs = 12;                 % 字符段数上限
+maxCompFr   = 0.25;               % 最大墨迹连通域占比上限(纯噪声/纯色块是一整坨)
 gray = rgb2gray(I);
 
 % ---------------- 1. 颜色掩膜 ----------------
@@ -94,7 +104,8 @@ eMask = buildEdgeMask(gray, W, minArea);
 % ---------------- 3. 打分选优 ----------------
 gates = struct('minExtent', minExtent, 'minColorFr', minColorFr, ...
                'minEdgeDen', minEdgeDen, 'minWhiteFr', minWhiteFr, 'minExtentW', minExtentW, ...
-               'minInkFr', minInkFr, 'inkDelta', inkDelta, 'maxAspectW', maxAspectW);
+               'minInkFr', minInkFr, 'inkDelta', inkDelta, 'maxAspectW', maxAspectW, ...
+               'minCharSegs', minCharSegs, 'maxCharSegs', maxCharSegs, 'maxCompFr', maxCompFr);
 [boxC, maskC, scC] = bestRegion(cMask, gray, colorMask, minArea, gates);
 [boxE, maskE, scE] = bestRegion(eMask, gray, colorMask, minArea, gates);
 
@@ -133,6 +144,11 @@ if ~isempty(plateBox)
     scoreInfo.colorFrac = fracColor(plateBox, colorMask);
     scoreInfo.whiteFrac = fracColor(plateBox, mWhite);
     scoreInfo.edgesFrac = fracColor(plateBox, edge(gray, 'sobel', 'vertical'));
+    % 结构证据也要按收紧后的框复算一遍: 与 bestRegion 里的 pass 判据保持一致
+    x1 = max(1, floor(plateBox(1)));              y1 = max(1, floor(plateBox(2)));
+    x2 = min(size(gray, 2), ceil(plateBox(1) + plateBox(3) - 1));
+    y2 = min(size(gray, 1), ceil(plateBox(2) + plateBox(4) - 1));
+    structOK = hasCharStructure(gray(y1:y2, x1:x2), gates);
     if strcmp(scoreInfo.source, 'white')
         scoreInfo.valid = scoreInfo.whiteFrac >= minWhiteFr && scoreInfo.edgesFrac >= minEdgeDen;
         if scoreInfo.whiteFrac < minWhiteFr
@@ -141,16 +157,19 @@ if ~isempty(plateBox)
             scoreInfo.reject = sprintf('框内垂直边缘密度 %.3f < %.3f, 没有成排的字符', scoreInfo.edgesFrac, minEdgeDen);
         end
     else
-        % 三个闸门要跟 bestRegion 里的 pass 判据保持一致: 漏掉 edgesFrac 会让
-        % "有颜色但没字"的候选(real03 那块蓝色车身就是)在最后一步被放行。
+        % 四个闸门要跟 bestRegion 里的 pass 判据保持一致: 漏掉 edgesFrac 会让
+        % "有颜色但没字"的候选(real03 那块蓝色车身就是)在最后一步被放行;
+        % 漏掉结构证据同理(见 hasCharStructure)。
         scoreInfo.valid = scoreInfo.extent >= minExtent && scoreInfo.colorFrac >= minColorFr ...
-                          && scoreInfo.edgesFrac >= minEdgeDen;
+                          && scoreInfo.edgesFrac >= minEdgeDen && structOK;
         if scoreInfo.extent < minExtent
             scoreInfo.reject = sprintf('候选区域矩形度 %.2f < %.2f, 不像规整的矩形车牌', scoreInfo.extent, minExtent);
         elseif scoreInfo.colorFrac < minColorFr
             scoreInfo.reject = sprintf('框内车牌底色只占 %.2f (< %.2f), 没有蓝/绿/黄底色', scoreInfo.colorFrac, minColorFr);
         elseif scoreInfo.edgesFrac < minEdgeDen
             scoreInfo.reject = sprintf('框内垂直边缘密度 %.3f < %.3f, 没有成排的字符', scoreInfo.edgesFrac, minEdgeDen);
+        elseif ~structOK
+            scoreInfo.reject = '框内切不出成排的字符(结构证据不足), 不像车牌';
         end
     end
 end
@@ -168,6 +187,89 @@ bw = imclose(bw, strel('rectangle', [3, wLen]));
 bw = imdilate(bw, strel('rectangle', [3 3]));
 bw = imfill(bw, 'holes');
 mask = bwareaopen(bw, round(minArea));
+end
+
+function ok = hasCharStructure(sub, gates)
+%HASCHARSTRUCTURE 结构证据: 框里得真有"成排的字"(挡纯噪声 / 纯色块)
+%   为什么要单加这一条: 其它闸门(长宽比 / 矩形度 / 底色占比 / 边缘密度)全是
+%   "尺度无关"的统计量, 纯随机噪声图上总能凑出一块样样过关的斑块 —— 实测
+%   680x1000 的纯噪声图 8/8 报出凭空捏造的车牌号(第四轮起就有, 见
+%   结果记录/第五轮_噪声图误检_实测证据.txt)。
+%   二值化沿用 segmentChars 前几步(CLAHE + Otsu + 保证"字符=少数"), 两项判据:
+%     1) 墨迹不能是"一整坨": 最大墨迹连通域占框内像素的比例 <= maxCompFr。
+%        纯噪声 / 纯色块二值化后墨迹连成一整块(实测 5 个噪声块 0.27~0.48),
+%        真车牌则是十来个字符块(实测 47 张有车牌图 0.035~0.14);
+%     2) 字符带内的列投影得切得出 >= 2 段(下限见 gates.minCharSegs):
+%        纯噪声每列的墨迹量几乎相同, 列投影是一整条(实测 8 个种子全是 1 段),
+%        真车牌实测 2~9 段(real01 8 段、real02 3 段、sm02 4 段)。
+%   段数下限取 2 而不是 6~9: 实测小结牌(120~170 px 宽)本来就会糊成一两段,
+%   卡 6 段会把它们全挡掉; 真正有判别力的是"1 段 = 一整坨"。
+%   先去掉"贯穿整行"的边框亮线(车牌自己的白边): 它让每一列都带上几个墨迹像素,
+%   会把字与字之间的间隙填平 —— 实测 bench12 的真车牌候选不去边框时列投影的
+%   谷底是 6~7(高于阈值), 只数出 2 段; 去掉后是干净的 9 段。
+%   ⚠️ 这条只说明"框里有成排的墨迹", 不等于"这是车牌": 蓝底广告牌、白底大字
+%   标牌一样能过(那是本工程已知的原理性限制)。
+[H, W] = size(sub);
+ok = false;
+if H < 10 || W < 30, return; end
+g = adapthisteq(sub, 'NumTiles', [4 8], 'ClipLimit', 0.02);
+bw = imbinarize(g, graythresh(g));
+if nnz(bw) > 0.5 * numel(bw), bw = ~bw; end      % 保证"字符 = 少数"
+rp = sum(bw, 2);
+if ~any(rp), return; end
+% 先去掉"贯穿整行"的边框亮线(车牌自己的白边): 它们让每一列都带上几个墨迹像素,
+% 会把字与字之间的间隙填平, 段数就数不出来了
+lmax = zeros(H, 1);
+for y = 1:H
+    d = diff([false, bw(y, :), false]);
+    ss = find(d == 1);  ee = find(d == -1) - 1;
+    if ~isempty(ss), lmax(y) = max(ee - ss + 1); end
+end
+bw(lmax >= 0.5 * W, :) = false;
+rp = sum(bw, 2);
+if ~any(rp), return; end
+% "墨迹是不是一大坨": 纯噪声/纯色块二值化后墨迹连成一整块, 车牌则是十来个
+% 字符块(实测 最大连通域占比: 纯噪声 0.27~0.48, 真车牌 0.035~0.14)
+cc = bwconncomp(bw, 8);
+maxCompFr = max(cellfun(@numel, cc.PixelIdxList)) / numel(bw);
+rows = find(rp >= 0.15 * max(rp));
+band = bw(rows(1):rows(end), :);
+bh = size(band, 1);
+cp = sum(band, 1);
+% 阈值为"该列墨迹量"的相对值(0.25*峰值)而不是 0.10*带高: 小结牌(120~170 px 宽)
+% 的字缝本来就只有几个像素深, 用绝对阈值会被判成"一整条"(实测 sm06: 谷底 6~11、
+% 峰值 47、带高 56, 用 0.10*56=5.6 切出来只有 1 段; 换成 0.25*47=11.75 后字缝
+% 全部露出来)。纯噪声的列投影本来就平坦(实测 峰/谷 = 14/4、13/2、15/5),
+% 相对阈值切不出第二段。
+[s, e] = runsOf(cp > 0.25 * max(cp));
+if isempty(s), return; end
+[s, e] = mergeCloser(s, e, max(1, round(0.008 * W)));     % 汉字被切散的缝
+w = e - s + 1;
+keep = w >= max(2, round(0.010 * W));
+s = s(keep);  e = e(keep);
+nSeg = numel(s);
+if nSeg < gates.minCharSegs || nSeg > gates.maxCharSegs, return; end
+if maxCompFr > gates.maxCompFr, return; end
+ok = true;
+end
+
+function [s, e] = runsOf(act)
+%RUNSOF 逻辑向量的连续 true 段 -> 起止下标
+act = act(:)';
+d = diff([false, act, false]);
+s = find(d == 1);  e = find(d == -1) - 1;
+end
+
+function [s, e] = mergeCloser(s, e, maxGap)
+%MERGECLOSER 把间隙 <= maxGap 的相邻段合并(例如汉字被切散的情况)
+i = 1;
+while i < numel(s)
+    if s(i + 1) - e(i) - 1 <= maxGap
+        e(i) = e(i + 1);  s(i + 1) = [];  e(i + 1) = [];
+    else
+        i = i + 1;
+    end
+end
 end
 
 function [box, regionMask, info] = bestRegion(mask, gray, colorMask, minArea, gates)
